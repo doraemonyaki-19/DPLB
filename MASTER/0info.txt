@@ -1,0 +1,57 @@
+# ASLB
+Academia Sinica lattice Boltzmann code is based on the Susp3d code by Tony Ladd in 2003.  
+Our additions to it are the bead-fluid coupling and particle molecular dynamics. 
+
+This code combines the lattice Boltzmann method with coarse-grained MD of
+polymers following the methods of Ahlrichs and Duenweg, JCP, 1999.  We have
+added the coarse-grained particle model developed and Hsu and Chen 2010.
+The code has been implemented by Chia-Wei Hsu and Yeng-Long Chen, 2010-2012.
+
+In 2012, YLC coded the initialization and forces for deformable boundaries. 
+
+Deformable particles are created by starting with the icosahedron and grow up
+to n levels.  The vertices are beads that are connected by the edges using
+either FENE or harmonic springs with the spring modulus Hfene.  Beads interact with each other via the
+Weeks-Chandler-Andersen potential (non-neighbors only for harmonic springs).
+A bending energy is added to neighboring faces by determining the angle
+between face-normal vectors, with the modulus kbend.  Volume and surface area are constrained with a
+penalties for deviating from predetermined V0 and A0 (found for particles at
+the equilibrium shape).  
+
+There is a known competition between kbend and Hfene that affects the particle
+shape.  If the bending is weak, i.e. smaller than Hfene, than the particle
+shape tends to be buckled (i.e. the icosahedron vertices point out).  If the
+bending is stronger than Hfene, then the particle surface smoothes.  
+
+The typical parameter values used are Hfene=30, Kbend = 100, KV=100, KA =
+100000.  
+
+These are parameters that can be chosen to match to real measurements of a cell
+elastic and bending modulus, isobaric compressibility, and surface area
+dilatation modulus.  
+
+In addition, thermal fluctuations are added to both the fluid and the
+particles.  kT is the thermal energy.  fric is the friction coefficient /
+rho_fluid.  (kT / (fric*Rho)) is the bead diffusivity. 
+
+For the deformable boundaries, the tube configuration is arbitrary and can be
+defined in init_cylinder.c. 
+
+spring_type = 0 means the bead is tied to its initial position by a spring. 
+
+init = 1 is a cylinderical tube with diameter varying sinusoidally about the
+average height.  rad_amp defined the oscillation amplitude and rad_period
+defines the oscillation period. If the max_x > rad_period, the (max_x -
+rad_period) is the length of a cylindrical tube in the center.  
+For init = 1, max_y and max_z should be even numbers, so that the tube center
+will be off-lattice.  There is an issue with fluid leakage if the tube
+boundaries are on-lattice.   
+
+
+init = 2 is a contracting slit that goes into a central channel.  rad_amp is
+the contraction angle (measured from the slit-channel intersection) and
+rad_period is the channel length.  
+
+For DP going through a small constriction, it is important to monitor the
+volume and area changes and vary KV and KA accordingly.  
+

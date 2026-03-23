@@ -1,0 +1,11 @@
+Numbers (cycle, steps, modes_p, lbe_time):      1  10000      0 1.000000
+Flags  (walls, backflow):             2      0
+Rho, ux, uy, uz                  1.00000e+00 0.00000e+00 0.00000e+00 0.00000e+00
+Mass fac, Vel_fac:               1.00000e+00  1.00000e+00
+Lub_cut   Del_hy:                0.00000e+00  1.00000e-03
+Particle accelerations:          0.00000e+00  0.00000e+00  0.00000e+00
+External accelerations:          0.00000e+00  0.00000e+00  0.00000e+00
+Wall velocities:                 0.00000e+00  0.00000e+00  0.00000e+00
+Relaxation times for fluid 1:    1.00000e+00  1.00000e+00  1.00000e+00
+Relaxation times for fluid 2:    1.00000e+00  1.00000e+00  1.00000e+00
+Lubrication ranges:              6.70000e-01  5.00000e-01  4.30000e-01

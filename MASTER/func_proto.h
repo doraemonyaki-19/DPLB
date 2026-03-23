@@ -1,0 +1,140 @@
+/*  Function prototype header file  */
+/***********************************************************************
+ASLB : Lattice-Boltzmann simulation code for deformable particle+polymer+
+lattice Boltzmann fluid
+Copyright (C) 2019 Yeng-Long Chen
+
+based on 
+Susp3D: Lattice-Boltzmann simulation code for particle-fluid suspensions
+Copyright (C) 2003 Tony Ladd
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+***********************************************************************/
+
+#include "mkl_vsl.h"
+
+void   driver (char *);
+int    update (struct object *, Float ***, int **, struct vector, double [MAX_Y][Num_Prop], int, int, int, int, int, char *, char *, char *, char *, struct DP *, struct DP *, struct monomer *, struct face *, struct DP_param *, struct DP_param *, struct DP_param *, VSLStreamStatePtr, char *);
+void   lbe_update (struct object *, struct DP_param *, struct DP_param *, struct DP_param *, struct DP *, struct DP *, struct monomer *, Float ***, int **, struct vector, struct vector *, double [MAX_Y][16], int, int, FILE *, VSLStreamStatePtr);
+
+Float aWeight(int idVel);
+void initlbe(double ***);
+
+void   spheroid_init (struct object *, double, double);
+void   wall_init     (struct object *, int);
+int    sphere     (struct object *, double, double, double);
+int    ellipsoid  (struct object *, double, double, double);
+int    cylinder   (struct object *, double, double, double);
+int    capped_cyl (struct object *, double, double, double);
+int    wall       (struct object *, double, double, double);
+
+int    sphere_init(struct DP_param *, struct DP_param *, struct DP *, struct monomer *, struct face *, char *);
+int    polymer_init(struct DP_param *, struct DP_param *, struct DP *, struct monomer *, char *, int, int );
+int    cyl_init(int **, struct DP_param *, int, int, struct DP *, struct monomer *, char *);
+void   get_forces(struct DP_param *, struct DP_param *, struct DP_param *, struct monomer *, struct face *, struct DP *, Float ***, int **, int, VSLStreamStatePtr);
+void   get_forces_cyl(struct DP_param *, struct DP_param *, struct DP_param *, struct monomer *, Float ***, int **, int, VSLStreamStatePtr);
+void   hi_force(struct DP_param *, struct DP_param *, struct DP_param *, struct monomer *, Float ***, int **, VSLStreamStatePtr);
+void   verlet_update(struct monomer *,  struct face *, struct DP *,  struct DP_param *, struct DP_param *, struct DP_param *, Float ***, int **, int, VSLStreamStatePtr);
+void   finestep_verlet(double, struct monomer *,  struct face *, struct DP *, struct DP_param *, struct DP_param *, struct DP_param *, Float ***, int **, int, VSLStreamStatePtr);
+void   vel_fluc(struct monomer *);
+void   sphere_props(struct DP_param *, struct DP_param *, struct DP *, struct monomer *, struct face *);
+void   sphere_props_short(struct DP_param *, struct DP *, struct monomer *);
+int    check_overlap(struct monomer *, struct face *, struct DP *, struct DP_param *, int);
+int    check_monoverlap(struct monomer, struct monomer);
+int    check_walloverlap(struct monomer ); 
+
+void   bnodes_init  (struct object *, int **);
+void   bnodes_add   (struct object *, Float ***);
+void   bnodes_del   (struct object *, Float ***);
+void   bnodes_mom   (struct object *, int **);
+void   bnodes_sph_1 (struct object *, Float ***, int **);
+void   bnodes_sph_2 (struct object *, Float ***, int **);
+void   bnodes_wall  (struct object *, Float ***, int **);
+void   bnodes_dp    (int **, struct DP_param *, struct DP *, struct monomer *, int);
+void   bnodes_tube  (Float ***, int **, struct DP_param *, struct DP *, struct monomer *, int);
+void   bnodes_tube_bb(Float ***, int **, struct DP_param *);
+void   implicit_force (struct object *, struct vector);
+void   matrix_inv     (struct object *);
+
+void   lbe_bconds  (Float ***);
+void   lbe_move  (Float ***);
+void   lbe_zcol    (Float **, int *, struct vector, int, double []);
+void   modes_write (Float **, int *, struct vector, FILE *);
+void   check_vel_conservation(Float ***, int);
+
+void   n_list (struct object *);
+void   n_list_mon (struct DP_param *, struct DP_param *, struct DP_param *, struct monomer *, struct DP *);
+void   lub    (struct object *, double);
+void   velcs_update  (struct object *, double);
+void   hs3d   (struct object *, double);
+int    coll   (struct object *, struct list *, double *, double, double, int, int, int, int);
+
+void   cluster_index  (struct object *, int *);
+void   cluster_make   (struct object *, struct cluster *, int);
+void   cluster_force  (struct object *, struct cluster *, double, int, int);
+void   cluster_update (struct object *, struct cluster *, double, int);
+void   cluster_matrix (struct object *, struct cluster *, double **, int, double);
+void   cj_grad   (double **, double *, int);
+
+void   globals   (struct object *);
+void   force_sum (struct object *);
+void   multi_sum (double *, int);
+
+void   file_name (char *, char *, int);
+void   gauss_jordan (double [6][12]);
+void   warning   (char *);
+void   fatal_err (char *, int);
+void   error_chk ();
+void   Write_Output(int, int, int, int, struct object *, struct DP *, struct DP *, struct monomer *, struct face *, struct DP_param *, struct DP_param *, struct DP_param *, Float ***, int **, char *) ;
+void   Write_Particle(struct object *, struct DP_param *, struct DP_param *, int, char *);
+void   Write_Fluid(Float ***, int **, int, char *);
+void   Write_Stress(struct DP *, struct monomer *, struct DP_param *, int , char *);
+void   Write_Monomer(struct DP *, struct DP *, struct monomer *, struct DP_param *, struct DP_param *, struct DP_param *, int , char * );
+void   Write_DP(struct DP *, struct monomer *, struct face *, struct DP_param *, struct DP_param *, int , char * );
+void   Write_Sphereconfig(struct DP *, struct monomer *, struct face *, struct DP_param *, int , char *);
+void   Write_Polymconfig(struct DP *, struct monomer *, struct DP_param *, int , char *, int);
+void   Write_Cylconfig(struct DP *, struct monomer *, struct DP_param *, int , char *, int);
+void   Write_stat(Float ***, int, double, char *);
+void   Write_Velslice(struct monomer *, Float ***, int **, int, char *);
+void   write_velocity_field(int, Float ***, int **, char *);
+void   Write_Nodemap(int **, int, char *);
+void   Write_time(int, char *);
+void   Write_RDF(struct DP * , struct monomer *, struct DP_param *, struct DP_param *, int , int, char *, int);
+
+void   vector_copy (double *, int, int, int, int);
+void   vector_xchg (double *, double *, int, int, int);
+void   broad_cast  (double *, int, int);
+void   global_sum  (double *, int);
+int    global_max  (int);
+void   init_procs  (int*, char ***);
+void   fini_procs  ();
+void   sync_procs  ();
+int    proc_num ();
+int    proc_id  ();
+double wclock ();
+
+double rand_num(long *, double,double);
+void SetFluctuationAmplitudes(Float *, Float, Float, Float, Float);
+void GenerateFluctuations(Float *);
+
+void CheckVslError(int);
+void product(double a[DIMS], double b[DIMS], double c[DIMS]);
+int *ivector(int);
+int **imatrix(int, int );
+double *dvector(int);
+double **matrix(int, int);
+void error_exit(char *);
+void free_matrix(double **M, int num);
+void free_imatrix(int **M, int num);

@@ -1,0 +1,1599 @@
+/* Following Ahlrichs and Dunweg, modeling polymer segments as point forces in the fluid */
+/* Coupled with LBE code to add hydrodynamic forces */
+
+#define  OMP_CRIT 0
+#define  DP_DEBUG 0
+#define  EV_DEBUG 0
+#include "header.h"
+
+void spring_force(struct DP_param *sphere_pm, struct monomer *monomers, struct face *faces, struct DP *DP);
+void spring_force_polym(struct DP_param *sphere_pm, struct monomer *mon, int bead0);
+void ev_force(Float radius, struct DP_param *sphere_pm, struct DP_param *polym_pm, struct monomer *mon);
+void ev_force_nlist(Float radius, struct DP_param *sphere_pm, struct DP_param *polym_pm, struct monomer *monomers, int nstep, struct face *faces, struct DP *DP);
+void Eval_EVForce(double *, int ev_type, double kT, double eps, double sigma, double sigma_LJ, double aev, double aev_alpha, double v, double q12mag, double *, int n1DP, int n2DP, int nstep);
+void Eval_faceforce(struct face *faces, struct DP *DP, struct monomer *monomers, struct DP_param *sphere_pm, double sigma, double sigma_LJ);
+void face_force(double sigma_LJ, int n1, int p1, int p2, int p3, double h, double *normal, struct DP_param *sphere_pm, struct monomer *mon);
+void wall_force(struct DP_param *sphere_pm, struct monomer *mon, int n0, int nf);
+void fluid_vel(int, int **, double *, int x[], Float ***, struct monomer *);
+void fluc_force(Float *force, double mon_stdev, int n, VSLStreamStatePtr rngstream);
+void product(double a[DIMS], double b[DIMS], double c[DIMS]);
+
+void get_forces(struct DP_param *sphere_pm, struct DP_param *polym_pm, struct DP_param *cyl_pm, struct monomer *monomers, struct face *faces, struct DP *DP, Float ***velcs_df, int **node_map, int n_step, VSLStreamStatePtr rngstream)
+{
+  extern int n_proc, num_proc;
+  extern int num_x;
+  extern int max_x, max_y, max_z;
+  extern int wall_flag;
+
+  int mon_proc;
+  int num_beads;
+  int i, j;
+  int n1, n2;
+  int s_type = 0;    /* spring type : 0 = FENE, 1=WLC, 2=harmonic */
+  int ev_type = 1;   /* ev type: 0=HS, 1=WCA, 2=gaussian */
+  int maxsize[DIMS];
+  int max_N_flag=0;
+  double send_buffer[2*DIMS+1];
+  FILE *stream;
+
+  maxsize[0]=max_x;
+  maxsize[1]=max_y;
+  maxsize[2]=max_z;
+
+  num_beads = sphere_pm->num_beads + polym_pm->num_beads;
+
+#pragma omp parallel for num_threads(NTHREAD) 
+  for(n1=0; n1<num_beads; n1++) {
+    if(n1 < sphere_pm->num_beads) 
+      for(j=0; j<DIMS; j++) {
+	monomers[n1].force[j] = sphere_pm->f_ext[j];
+	monomers[n1].evforce[j] = 0.0;
+      }
+    else 
+      for(j=0; j<DIMS; j++) {
+	monomers[n1].force[j] = polym_pm->f_ext[j];
+	monomers[n1].evforce[j] = 0.0;
+      } 
+  }
+
+  if(DP_DEBUG == 1)
+    printf("init forces done \n");
+
+  /* Calculate spring and exc. vol. forces if # of beads > 1 */
+  if(num_beads > 1) {
+    /*excluded volume forces */
+    if(sphere_pm->nlist_flag == 1) {
+      for(n1=0; n1<num_beads; n1++)
+        if(monomers[n1].list[0] >= MAX_N-1) max_N_flag = 1;
+      
+      if(max_N_flag == 1) 
+        ev_force(monomers[0].radius, sphere_pm, polym_pm,  monomers);
+      else 
+	ev_force_nlist(monomers[0].radius, sphere_pm, polym_pm, monomers, n_step, faces, DP);
+    }
+    else 
+      ev_force(monomers[0].radius, sphere_pm, polym_pm, monomers);
+  }
+  
+  if(DP_DEBUG == 1)
+    printf("ev forces done \n");
+  /*intra-particle forces */
+  if(sphere_pm->NDP > 0)
+  spring_force(sphere_pm, monomers, faces, DP);  /* 0 = FENE, 2=harmonic */
+  if(polym_pm->NDP > 0)
+    spring_force_polym(polym_pm, monomers, sphere_pm->num_beads);  /* 0 = FENE, 2=harmonic */
+
+  if(DP_DEBUG == 1)
+    printf("spring forces done \n");
+
+#pragma omp parallel for num_threads(NTHREAD) private(j)
+  for(n1=0; n1<num_beads; n1++) {
+    if(n1 < sphere_pm->num_beads)
+      for(j=0; j<DIMS; j++) {
+	monomers[n1].force[j] *= sphere_pm->monmass;
+	monomers[n1].f_int[j] = monomers[n1].force[j];
+      }
+    else
+      for(j=0; j<DIMS; j++) {
+	monomers[n1].force[j] *= polym_pm->monmass;
+	monomers[n1].f_int[j] = monomers[n1].force[j];
+      }
+    
+    if(n1 == 1 && DP_DEBUG ==1) {
+      printf("mon %d pos (%lf %lf %lf) force (%lf %lf %lf) vel (%lf %lf %lf)\n", n1, monomers[n1].pos_pbc[0], monomers[n1].pos_pbc[1], monomers[n1].pos_pbc[2], monomers[n1].force[0], monomers[n1].force[1], monomers[n1].force[2], monomers[n1].vel[0], monomers[n1].vel[1], monomers[n1].vel[2]);
+    }
+  }
+
+  if(DP_DEBUG == 1)  
+    printf("internal forces done \n");
+
+  /*hydrodynamic and fluctuation forces */
+  hi_force(sphere_pm, polym_pm, cyl_pm, monomers, velcs_df, node_map, rngstream);
+
+  if(DP_DEBUG == 1)
+    printf("hi forces done \n");
+
+  if(DP_DEBUG == 1) {
+    n1 = 1;
+    printf("mon %d fricforce (%lf %lf %lf) fluidvel (%lf %lf %lf)\n", n1, monomers[n1].fricforce[0], monomers[n1].fricforce[1], monomers[n1].fricforce[2], monomers[n1].fluid_vel[0], monomers[n1].fluid_vel[1], monomers[n1].fluid_vel[2]);
+  }
+  
+  if(wall_flag > 0) {
+    wall_force(sphere_pm, monomers, 0, sphere_pm->num_beads);
+    wall_force(polym_pm, monomers, sphere_pm->num_beads, num_beads);
+  }
+
+  if(DP_DEBUG == 1)
+    printf("wall forces done \n");
+}
+
+
+/* Calculate spring force : type = 0 FENE, 1 WLC, 2 harmonic */
+/* Calculate volume constraint force */
+void spring_force(struct DP_param *sphere_pm, struct monomer *monomers, struct face *faces, struct DP *DP)
+{
+  extern int n_proc;
+  extern int max_x, max_y, max_z;
+  extern int num_x;
+  extern int wall_flag;
+  int i;
+  int num_beads = sphere_pm->num_beads;
+  int numsphere;
+  int NDP[NTYPES];
+  int nlevel[NTYPES];
+  int maxsize[DIMS];
+  Float Nks = sphere_pm->nks*sphere_pm->sigma_k;
+  Float sigma = monomers[0].radius*2.0;
+  double H_fene[NTYPES];
+  double k_bend[NTYPES];
+  double k_V[NTYPES], k_A[NTYPES];
+  double V0[NTYPES], A0[NTYPES];
+  FILE *stream;
+
+  maxsize[0]=max_x;
+  maxsize[1]=max_y;
+  maxsize[2]=max_z;
+
+  for(i=0; i<NTYPES; i++) {
+    NDP[i] = sphere_pm->Ntype[i];
+    nlevel[i] = sphere_pm->nlevel[i];
+    H_fene[i] = sphere_pm->H_fene[i];
+    k_bend[i] = sphere_pm->k_bend[i]*sphere_pm->kT/sigma;
+    k_V[i] = sphere_pm->k_V[i]*sphere_pm->kT/sigma;
+    k_A[i] = sphere_pm->k_A[i]*sphere_pm->kT/sigma;
+
+    V0[i] = sphere_pm->V0[i];
+    A0[i] = sphere_pm->A0[i];
+  }
+
+  numsphere = NDP[0]+NDP[1];
+
+#pragma omp parallel for num_threads(NTHREAD) 
+  for(i=0; i<numsphere; i++) {
+    int n1, n2, n3, n4;
+    int j, k, d;
+    int nface;
+    Float q12[DIMS], q1[DIMS], q2[DIMS], q3[DIMS];
+    Float q0, q12mag;
+    Float force[DIMS];
+    Float r1, mag;
+    double normal[2][DIMS], mag_normal[2], a[DIMS], dr[DIMS];
+    double dot1a, dot2a, dot3a;
+    double n12, n11, n22;
+    double com[DIMS], delta_V=0.0, delta_A=0.0;
+    int type = (i<sphere_pm->Ntype[0] ? 0 :1);
+    int Nbead = sphere_pm->N_per_DP[type];
+    int Nface = sphere_pm->face_per_DP[type];
+    int face0 = (type==0 ? i*sphere_pm->face_per_DP[0] : NDP[0]*sphere_pm->face_per_DP[0] + (i-NDP[0])*sphere_pm->face_per_DP[1]);
+    int bead0 = (type==0 ? i*sphere_pm->N_per_DP[0] : NDP[0]*sphere_pm->N_per_DP[0] + (i-NDP[0])*sphere_pm->N_per_DP[1]);
+
+    for(d=0; d<DIMS; d++) 
+      com[d] = DP[i].com[d];
+
+    /* calculate face area and total volume */
+    /* loop over all faces */
+    for(j=0; j<sphere_pm->face_per_DP[type]; j++) {
+      nface = face0 + j;
+      n1 = faces[nface].vertices[0];
+      for (d=0 ; d<DIMS ; d++)
+        dr[d] = monomers[n1].pos_pbc[d] - com[d];
+      n2 = faces[nface].vertices[1];
+      for (d=0 ; d<DIMS ; d++)
+	q1[d] = monomers[n2].pos_pbc[d] - monomers[n1].pos_pbc[d];
+      n3 = faces[nface].vertices[2];
+      for (d=0 ; d<DIMS ; d++)
+	q2[d] = monomers[n3].pos_pbc[d] - monomers[n1].pos_pbc[d];
+
+      product(q1, q2, normal[0]);
+      delta_V += fabs(dr[0]*normal[0][0]+dr[1]*normal[0][1]+dr[2]*normal[0][2])/6.;
+      delta_A += sqrt(normal[0][0]*normal[0][0]+normal[0][1]*normal[0][1]+normal[0][2]*normal[0][2])/2.0;
+    }
+
+    /* substract the equilibrium volume */
+    delta_V = (-1)*k_V[type]*(delta_V-V0[type])/V0[type];
+    delta_A = (-1)*k_A[type]*(delta_A-A0[type])/A0[type];
+
+    /* force is divided upon 3 nodes. another factor of 2 due to area */
+    delta_V /= 6.;
+
+    for(j=0; j<Nbead; j++) {
+      n1 = bead0+j;
+
+      for (k=1 ; k<=monomers[n1].blist[0][0] ; k++) {
+	n2 = monomers[n1].blist[k][0];
+
+	q12mag=0.0;
+	for(d=0; d<DIMS; d++) {
+	  q12[d]=monomers[n1].pos_pbc[d] - monomers[n2].pos_pbc[d];
+	  if ((d==0 && wall_flag<3) || (d==2 && wall_flag<2) || (d==1 && wall_flag<1))
+	    q12[d]=n_image(q12[d], maxsize[d]);
+	  q12mag+=q12[d]*q12[d];
+	}    
+	q12mag = sqrt(q12mag);
+
+	for(d=0; d<DIMS; d++)
+	  q12[d] /= q12mag;
+
+	/* fene spring */
+	if(sphere_pm->spring == 0) {
+	  q0 = sphere_pm->Q_fene[type]*(monomers[n1].radius+monomers[n2].radius);
+
+	  if(q12mag < q0) 
+	    mag = (sphere_pm->kT/sigma)*H_fene[type]*q12mag/(1.0 - (q12mag/q0)*(q12mag/q0));
+	  else {
+	    stream = fopen("output.err", "w");
+	    fprintf(stream, "Spring is broken, %d %d %le %le\n", n1, n2, q12mag, q0);
+	    fprintf(stream, "sphere %d mon %d pos=(%le %le %le), mon %d pos = (%le %le %le)\n", i, n1, monomers[n1].pos_pbc[0], monomers[n1].pos_pbc[1], monomers[n1].pos_pbc[2], n2, monomers[n2].pos_pbc[0], monomers[n2].pos_pbc[1], monomers[n2].pos_pbc[2]);
+	    fprintf(stream, "mon %d force=(%le %le %le), mon %d force = (%le %le %le)\n", n1, monomers[n1].force[0], monomers[n1].force[1], monomers[n1].force[2], n2, monomers[n2].force[0], monomers[n2].force[1], monomers[n2].force[2]);
+	    
+	    for(k=1; k<=monomers[n1].blist[0][0]; k++) {
+	      n2 = monomers[n1].blist[k][0];
+	      fprintf(stream, "%d %le %le %le\n", n2, monomers[n2].pos_pbc[0], monomers[n2].pos_pbc[1], monomers[n2].pos_pbc[2]);
+	    }
+	    fprintf(stream, "\n");
+
+	    fclose(stream);
+	    exit(11);
+	  }
+	}
+
+	/* worm like spring */
+	else if (sphere_pm->spring == 1) {
+	  r1 = q12mag/Nks;
+	  if(r1 < 1.0)
+	    mag = 2.0*sphere_pm->kT/sphere_pm->sigma_k*(0.25/((1.0-r1)*(1.0-r1))-0.25+r1);
+	  else {	  
+	    if(n_proc == 0) {
+	      stream = fopen("output.err", "w");
+	      fprintf(stream, "Spring is broken, %d %le\n", n1, q12mag);
+	      fprintf(stream, "sphere %d mon %d pos=(%le %le %le), mon %d pos = (%le %le %le)\n", i, n1, monomers[n1].pos_pbc[0], monomers[n1].pos_pbc[1], monomers[n1].pos_pbc[2], n2, monomers[n2].pos_pbc[0], monomers[n2].pos_pbc[1], monomers[n2].pos_pbc[2]);
+	      fprintf(stream, "mon %d force=(%le %le %le), mon %d force = (%le %le %le)\n", n1, monomers[n1].force[0], monomers[n1].force[1], monomers[n1].force[2], n2, monomers[n2].force[0], monomers[n2].force[1], monomers[n2].force[2]);
+	      fclose(stream);
+	      exit(11);
+	    }
+	  }
+	}
+
+	/* harmonic spring */
+	else if (sphere_pm->spring == 2) {
+	  mag = 2.0*(sphere_pm->kT/sigma)*H_fene[type]*(q12mag-1.0);
+	  //	  printf("%d %d mag=%le kT=%le sigma = %le Hf = %le\n", n1, n2, mag, sphere_pm->kT, sigma, H_fene[type]); 
+	}
+
+	for(d=0; d<DIMS; d++) {
+	  force[d]=q12[d]*mag;
+	  monomers[n1].force[d]-=force[d];
+	  monomers[n2].force[d]+=force[d];
+	}
+
+	//	printf("Test 1 n1 %d (%le %le %le) n2 %d (%le %le %le) q12mag %le force (%le %le %le)\n", n1, monomers[n1].pos_pbc[0], monomers[n1].pos_pbc[1], monomers[n1].pos_pbc[2], n2, monomers[n2].pos_pbc[0], monomers[n2].pos_pbc[1], monomers[n2].pos_pbc[2], q12mag, force[0], force[1], force[2]);
+
+	//	printf("sphere %d bead %d type = %d Hfene=%le force=(%le %le %le)\n", i, j, type, H_fene[type], force[0], force[1], force[2]);
+  
+	/* bending force between face (n1,n2,n3) and face (n1,n2,n4) */
+	
+	/* note: n1, n2, n3, n4 corresponds to 3 4 1 2 in my notes!! */
+	n3 = monomers[n1].blist[k][1];
+	n4 = monomers[n1].blist[k][2];
+
+	for(d=0; d<DIMS; d++) {
+	  q1[d]=monomers[n2].pos_pbc[d] - monomers[n3].pos_pbc[d];
+	  q2[d]=monomers[n1].pos_pbc[d] - monomers[n4].pos_pbc[d];
+	  q3[d]=monomers[n2].pos_pbc[d] - monomers[n1].pos_pbc[d];
+	  if ((d==0 && wall_flag<3) || (d==2 && wall_flag<2) || (d==1 && wall_flag<1)) {
+	    q1[d]=n_image(q1[d], maxsize[d]);
+	    q2[d]=n_image(q2[d], maxsize[d]);
+	    q3[d]=n_image(q3[d], maxsize[d]);
+	  }
+	}    
+
+	product(q3,q1,normal[0]);
+	product(q2,q3,normal[1]);
+
+	mag_normal[0] = sqrt(normal[0][0]*normal[0][0] + normal[0][1]*normal[0][1] + normal[0][2]*normal[0][2]);
+	mag_normal[1] = sqrt(normal[1][0]*normal[1][0] + normal[1][1]*normal[1][1] + normal[1][2]*normal[1][2]);
+
+	/* volume restoring forces */
+	/* F_V = (-k_V*(V-V0/V0)*area*normal)/3 */
+	/* area = mag_normal/2; the factor mag_normal is in mornal; the factor 2 is in delta_V */
+	/* for each face, F_V is distributed upon 3 nodes. since each face will be traversed 3 times, we put the force on only one node at a time */
+	for (d=0 ; d<DIMS ; d++) {
+	  monomers[n3].force[d] += delta_V*normal[0][d];
+	  monomers[n4].force[d] += delta_V*normal[1][d];
+	}
+
+	for (d=0 ; d<DIMS ; d++) {
+	  normal[0][d] /= mag_normal[0];
+	  normal[1][d] /= mag_normal[1];
+	}
+
+	product(normal[1], normal[0], a);
+      
+	for (d=0 ; d<DIMS ; d++) {
+	  normal[0][d] /= mag_normal[0];
+	  normal[1][d] /= mag_normal[1];
+	}
+
+	dot1a = q1[0]*a[0] + q1[1]*a[1] + q1[2]*a[2];
+	dot2a = q2[0]*a[0] + q2[1]*a[1] + q2[2]*a[2];
+	dot3a = q3[0]*a[0] + q3[1]*a[1] + q3[2]*a[2];
+
+	mag = k_bend[type];
+
+	for (d=0 ; d<DIMS ; d++) {
+	  monomers[n3].force[d] += mag*dot3a*normal[0][d];
+	  monomers[n4].force[d] += mag*dot3a*normal[1][d];
+	  monomers[n1].force[d] += mag*(-dot1a*normal[0][d]-(dot2a+dot3a)*normal[1][d]);
+	  monomers[n2].force[d] += mag*((dot1a-dot3a)*normal[0][d]+dot2a*normal[1][d]);
+	}
+      }
+    }
+
+    double v23[DIMS], v31[DIMS], v12[DIMS], v21[DIMS];
+    double normalVector[DIMS], normal_mag;
+    double temp_n1[DIMS], temp_n2[DIMS],temp_n3[DIMS];
+
+    /* area restoring forces */
+    for(j=0; j < Nface; j++) {
+      nface = face0 + j;
+      n1 = faces[nface].vertices[0];
+      n2 = faces[nface].vertices[1];
+      n3 = faces[nface].vertices[2];
+
+      for(d=0; d < DIMS; d++) {
+        v23[d] = monomers[n2].pos_pbc[d] - monomers[n3].pos_pbc[d];
+        v31[d] = monomers[n3].pos_pbc[d] - monomers[n1].pos_pbc[d];
+        v12[d] = monomers[n1].pos_pbc[d] - monomers[n2].pos_pbc[d];
+        v21[d] = monomers[n2].pos_pbc[d] - monomers[n1].pos_pbc[d];
+      }
+      product(v31, v21, normalVector);
+      normal_mag = sqrt(normalVector[0]*normalVector[0]+normalVector[1]*normalVector[1]+normalVector[2]*normalVector[2]);
+      for(d=0; d < DIMS; d++)
+        normalVector[d] /= normal_mag;
+      product(normalVector,v23, temp_n1);
+      product(normalVector, v31, temp_n2);
+      product(normalVector, v12, temp_n3);
+      for(d=0 ; d < DIMS ; d++) {
+	monomers[n1].force[d] += delta_A*0.5*temp_n1[d];
+	monomers[n2].force[d] += delta_A*0.5*temp_n2[d];
+	monomers[n3].force[d] += delta_A*0.5*temp_n3[d];
+      }
+    }
+
+    for(j=0; j<Nbead; j++) {
+      n1 = bead0 +j;
+      for(k=0; k<DIMS; k++) 
+	for(d=0; d<DIMS; d++) 
+	  monomers[n1].stress[k][d] = (monomers[n1].pos_pbc[k]-com[k])* monomers[n1].force[d] * sphere_pm->monmass;
+    }
+  }
+}
+
+/* Calculate spring force : type = 0 FENE, 1 WLC, 2 harmonic */
+void spring_force_polym(struct DP_param *polym_pm, struct monomer *monomers, int n0)
+{
+  extern int n_proc;
+  extern int max_x, max_y, max_z;
+  extern int num_x;
+  extern int wall_flag;
+  int n1, n2, n3, n4;
+  int i,j,k,d;
+  int num_beads = polym_pm->num_beads;
+  int NDP;
+  int Nbead[NTYPES];
+  int maxsize[DIMS];
+  Float Nks = polym_pm->nks*polym_pm->sigma_k;
+  double H_fene[NTYPES];
+  double k_bend[NTYPES];
+  double dr[DIMS];
+  FILE *stream;
+
+  maxsize[0]=max_x;
+  maxsize[1]=max_y;
+  maxsize[2]=max_z;
+
+  NDP = 0;
+  for(j=0; j<NTYPES; j++) {
+    NDP += polym_pm->Ntype[j];
+    Nbead[j] = polym_pm->N_per_DP[j];
+    H_fene[j] = polym_pm->H_fene[j];
+  }
+
+#pragma omp parallel for num_threads(NTHREAD)    
+  for(i=0; i<NDP; i++) {
+    int type, bead0;
+    int d, j, k, n1, n2; 
+    double force[DIMS], q12[DIMS], q12mag, q0, mag, r1;
+    double sigma;
+
+    if(i < polym_pm->Ntype[0]) {
+      type = 0;
+      bead0 = n0;
+    }
+    else {
+      type =1;
+      bead0= polym_pm->N_per_DP[0]*Nbead[0]+n0;
+    }
+
+    for(j=0; j<Nbead[type]; j++) {
+      n1 = bead0+i*Nbead[type]+j;
+      sigma = monomers[n1].radius;
+
+      for (k=1 ; k<=monomers[n1].blist[0][0] ; k++) {
+	n2 = monomers[n1].blist[k][0];
+	sigma += monomers[n2].radius;
+	k_bend[j] = polym_pm->k_bend[type]*polym_pm->kT/sigma;
+      
+	q12mag=0.0;
+	for(d=0; d<DIMS; d++) {
+	  q12[d]=monomers[n1].pos[d] - monomers[n2].pos[d];
+	  if ((d==0 && wall_flag<3) || (d==2 && wall_flag<2) || (d==1 && wall_flag<1))
+	    q12[d]=n_image(q12[d], maxsize[d]);
+	  q12mag+=q12[d]*q12[d];
+	}    
+	q12mag = sqrt(q12mag);
+	  
+	for(d=0; d<DIMS; d++)
+	  q12[d] /= q12mag;
+	
+	/* fene spring */
+	if(polym_pm->spring == 0) {
+	  q0 = polym_pm->Q_fene[type]*(monomers[n1].radius+monomers[n2].radius);
+	  
+	  if(q12mag < q0) 
+	    mag = (polym_pm->kT/sigma)*H_fene[type]*q12mag/(1.0 - (q12mag/q0)*(q12mag/q0));
+	  else {
+	    stream = fopen("output.err", "w");
+	    fprintf(stream, "Spring is broken, %d %d %le %le\n", n1, n2, q12mag, q0);
+	    fprintf(stream, "polym %d mon %d pos=(%le %le %le), mon %d pos = (%le %le %le)\n", i, n1, monomers[n1].pos_pbc[0], monomers[n1].pos_pbc[1], monomers[n1].pos_pbc[2], n2, monomers[n2].pos_pbc[0], monomers[n2].pos_pbc[1], monomers[n2].pos_pbc[2]);
+	    fprintf(stream, "mon %d force=(%le %le %le), mon %d force = (%le %le %le)\n", n1, monomers[n1].force[0], monomers[n1].force[1], monomers[n1].force[2], n2, monomers[n2].force[0], monomers[n2].force[1], monomers[n2].force[2]);
+	    
+	    for(k=1; k<=monomers[n1].blist[0][0]; k++) {
+	      n2 = monomers[n1].blist[k][0];
+	      fprintf(stream, "%d %le %le %le\n", n2, monomers[n2].pos_pbc[0], monomers[n2].pos_pbc[1], monomers[n2].pos_pbc[2]);
+	    }
+	    fprintf(stream, "\n");
+	    
+	    fclose(stream);
+	    exit(11);
+	  }
+	}
+	
+	/* worm like spring */
+	else if (polym_pm->spring == 1) {
+	  r1 = q12mag/Nks;
+	  if(r1 < 1.0)
+	    mag = 2.0*polym_pm->kT/polym_pm->sigma_k*(0.25/((1.0-r1)*(1.0-r1))-0.25+r1);
+	  else {	  
+	    if(n_proc == 0) {
+	      stream = fopen("output.err", "w");
+	      fprintf(stream, "Spring is broken, %d %le\n", n1, q12mag);
+	      fprintf(stream, "polym %d mon %d pos=(%le %le %le), mon %d pos = (%le %le %le)\n", i, n1, monomers[n1].pos_pbc[0], monomers[n1].pos_pbc[1], monomers[n1].pos_pbc[2], n2, monomers[n2].pos_pbc[0], monomers[n2].pos_pbc[1], monomers[n2].pos_pbc[2]);
+	      fprintf(stream, "mon %d force=(%le %le %le), mon %d force = (%le %le %le)\n", n1, monomers[n1].force[0], monomers[n1].force[1], monomers[n1].force[2], n2, monomers[n2].force[0], monomers[n2].force[1], monomers[n2].force[2]);
+	      fclose(stream);
+	      exit(11);
+	    }
+	  }
+	}
+	
+	/* harmonic spring */
+	else if (polym_pm->spring == 2) {
+	  mag = 2.0*(polym_pm->kT/sigma)*H_fene[type]*(q12mag-1.0);
+	  
+	  //	  printf("%d %d mag=%le kT=%le sigma = %le Hf = %le q12mag = %le\n", n1, n2, mag, polym_pm->kT, sigma, H_fene[type], q12mag); 
+	}
+	
+	for(d=0; d<DIMS; d++) {
+	  force[d]=q12[d]*mag;
+	  
+	  monomers[n1].force[d]-=force[d];
+	  monomers[n2].force[d]+=force[d];
+	}
+	
+	//	printf("polym %d bead %d type = %d Hfene=%le force=(%le %le %le)\n", i, j, type, H_fene[type], force[0], force[1], force[2]);
+	  
+	/* BENDING FORCE NOT IMPLEMENTED !!! */
+      }
+    }
+  }
+}
+
+
+/* Exc. Vol forces type = 0 HS, 1 LJ, 2 Gaussian */
+void ev_force(Float radius, struct DP_param *sphere_pm, struct DP_param *polym_pm, struct monomer *monomers)
+{
+  extern int n_proc;
+  extern int max_x, max_y, max_z;
+  extern int num_x;
+  extern int wall_flag;
+  extern double tau;
+  int i, j;
+  long n1, n2;
+  int num_beads = sphere_pm->num_beads + polym_pm->num_beads;
+  Float sigma = 2.0*radius;
+  Float cutoff = sphere_pm->evcutoff*radius;
+  Float aterm;
+  Float q12[DIMS];
+  Float q12mag;
+  Float eps;
+  Float force[DIMS];
+  int maxsize[DIMS];
+  FILE *stream;
+  double eta = (tau - 0.5)/3.0;
+  double Rg = polym_pm->Ss;
+  double Nks =polym_pm->nks;
+  double v = polym_pm->sigma_k*polym_pm->sigma_k*polym_pm->sigma_k;
+  double aev_alpha = 4.0/3.0*Rg*Rg;
+  double aev = Nks*Nks*(1.0/((Pi*aev_alpha)*sqrt(Pi*aev_alpha)));
+  Float sigma_LJ = 1.0*sigma;
+  
+  
+  maxsize[0]=max_x;
+  maxsize[1]=max_y;
+  maxsize[2]=max_z;
+  
+  for(i=0; i<DIMS; i++)
+    force[i]=0.0;
+
+  for(n1=0; n1 < num_beads-1; n1++) {
+    for(n2=n1+1; n2 < num_beads; n2++) {
+
+      q12mag=0.0;
+      for(j=0; j<DIMS; j++) {
+        q12[j]=monomers[n1].pos_pbc[j] - monomers[n2].pos_pbc[j];
+        if ((j==0 && wall_flag<3) || (j==2 && wall_flag<2) || (j==1 && wall_flag<1))
+          q12[j]=n_image(q12[j], maxsize[j]);
+        q12mag+=q12[j]*q12[j];
+      }
+	
+      q12mag = sqrt(q12mag);
+	
+      if(sphere_pm->ev_type ==0) {
+	for(i=0; i<DIMS; i++)
+	  force[i]=0.0;
+      }
+	
+      /* WCA potential */
+      else if(sphere_pm->ev_type ==1) {
+	cutoff = 1.12*sigma;
+	eps = sphere_pm->kT/sigma;
+
+	if(q12mag > cutoff) 
+	  for(i=0; i<DIMS; i++)
+	    force[i]=0.0;
+	else if(q12mag < cutoff) {
+	  aterm = (sigma/q12mag);
+	  aterm = aterm*aterm*aterm*aterm*aterm*aterm;
+	  
+	  for(i=0; i<DIMS; i++) 
+	    force[i]=-24.0*(eps*(2.0*(aterm*aterm)-aterm)) * q12[i]/q12mag/q12mag;
+	  
+	  /*
+	  if(q12mag <= sigma && q12mag >=0.8*sigma) {
+	    for(i=0; i<DIMS; i++) 
+	      force[i]=-4.0*eps*(190.0-(q12mag-0.8*sigma)*920.0/sigma) * q12[i]/q12mag;
+	  }
+	  */
+	}
+      }
+      
+      /* gaussian */
+      else if(sphere_pm->ev_type ==2) {
+	if(q12mag > sphere_pm->evcutoff*Rg)
+	  for(i=0; i<DIMS; i++)
+	    force[i]=0.0;
+	else {
+	  aterm = aev/aev_alpha * exp(-q12mag*q12mag/aev_alpha);
+	    
+	  for(i=0; i<DIMS; i++) 
+	    force[i]= (-v*sphere_pm->kT*aterm*q12[i]);
+	}	
+      }
+      /* L-J potential */
+      else if(sphere_pm->ev_type ==3) {
+        if(monomers[n1].DP_id != monomers[n2].DP_id) {
+	  cutoff = 2.5*sigma;
+	  sigma_LJ = 0.25*sigma;
+	  /*
+	  if(q12mag > 1.12*sigma_LJ)
+	    eps = sphere_pm->eps*sphere_pm->kT/sigma_LJ;
+	  else
+	    eps = 50.0*sphere_pm->kT/sigma_LJ;
+	  */
+        }
+        else {
+	  cutoff = 1.12*sigma;
+	  sigma_LJ = sigma;
+	  eps = sphere_pm->kT/sigma;
+        }
+	
+	if(q12mag > cutoff) 
+	  for(i=0; i<DIMS; i++)
+	    force[i]=0.0;
+	else if(q12mag < cutoff) {
+	  aterm = (sigma_LJ/q12mag);
+	  aterm = aterm*aterm*aterm*aterm*aterm*aterm;
+	  
+	  for(i=0; i<DIMS; i++) 
+	    force[i]=-24.0*(eps*(2.0*(aterm*aterm)-aterm)) * q12[i]/q12mag/q12mag;
+	}
+      }
+      
+	
+      for(i=0; i<DIMS; i++) {
+	monomers[n1].evforce[i] -= force[i];
+	monomers[n2].evforce[i] += force[i];
+
+	monomers[n1].force[i] -= force[i];
+	monomers[n2].force[i] += force[i];
+      }
+
+      for(i=0; i<DIMS; i++) {
+	for(j=0; j<DIMS; j++) {
+	  monomers[n1].stress[i][j] += q12[i]* force[j] * sphere_pm->monmass;
+	  monomers[n2].stress[i][j] -= q12[i]* force[j] * sphere_pm->monmass;
+	}
+      }
+      
+    }
+  }
+}
+
+/* Exc. Vol forces type = 0 HS, 1 LJ, 2 Gaussian */
+void ev_force_nlist(Float radius, struct DP_param *sphere_pm, struct DP_param *polym_pm, struct monomer *monomers, int nstep, struct face *faces, struct DP *DP)
+{
+  extern int n_proc;
+  extern int max_x, max_y, max_z;
+  extern int num_x;
+  extern int wall_flag;
+  extern double tau;
+
+  long n1;
+  int num_beads = sphere_pm->num_beads+polym_pm->num_beads;
+  Float sigma = 2.0*radius;
+  Float sigma_LJ = 0.25*sigma;
+  int maxsize[DIMS];
+  FILE *stream;
+  double eps = sphere_pm->eps;
+  double eta = (tau - 0.5)/3.0;
+  double Rg = polym_pm->Ss;
+  double Nks =polym_pm->nks;
+  double v = polym_pm->sigma_k*polym_pm->sigma_k*polym_pm->sigma_k;
+  double aev_alpha = 4.0/3.0*Rg*Rg;
+  double aev = Nks*Nks*(1.0/((Pi*aev_alpha)*sqrt(Pi*aev_alpha)));
+		
+  maxsize[0]=max_x;
+  maxsize[1]=max_y;
+  maxsize[2]=max_z;
+
+  /* Apply the bead-face force for attractive particles */
+  if(sphere_pm->ev_type == 3) 
+    Eval_faceforce(faces, DP, monomers, sphere_pm, sigma, sigma_LJ);
+
+  // For the omp parallel loop, we sum the forces on each monomer to avoid execution order error, denote by omp 
+#pragma omp parallel for num_threads(NTHREAD)
+  for(n1=0; n1 < num_beads; n1++) {
+    int i, j, k;
+    int n2;
+    int n1DP, n2DP;
+    int flag = 0;
+    Float aterm;
+    Float q12[DIMS];
+    Float q12mag;
+    Float *force;
+    
+    force=calloc(DIMS, sizeof(Float));
+    
+    for(k=1; k <= monomers[n1].list[0]; k++) {
+      n2 = monomers[n1].list[k];
+      q12mag=0.0;
+      for(j=0; j<DIMS; j++) {
+	force[j] = 0.0;
+
+	q12[j]=monomers[n1].pos_pbc[j] - monomers[n2].pos_pbc[j];
+	if ((j==0 && wall_flag<3) || (j==2 && wall_flag<2) || (j==1 && wall_flag<1))
+	  q12[j]=n_image(q12[j], maxsize[j]);
+	q12mag+=q12[j]*q12[j];
+      }
+      
+      q12mag = sqrt(q12mag);
+      n1DP = monomers[n1].DP_id;
+      n2DP = monomers[n2].DP_id;
+      
+      if(n1DP < sphere_pm->NDP) {
+	/* DP - DP EV force */
+	if(n2DP < sphere_pm->NDP) {
+	  Eval_EVForce(force, sphere_pm->ev_type, sphere_pm->kT, sphere_pm->eps, sigma, sigma_LJ, aev, aev_alpha, v, q12mag, q12, n1DP, n2DP, nstep);	    
+	  
+	  for(i=0; i<DIMS; i++)
+	    for(j=0; j<DIMS; j++)
+	      monomers[n1].stress[i][j] += q12[i]* force[j] * sphere_pm->monmass;
+	}
+	/* DP - polymer EV force */
+	else if(n2 < num_beads) {
+	  Eval_EVForce(force, 1, sphere_pm->kT, sphere_pm->eps, sigma, sigma_LJ, aev, aev_alpha, v, q12mag, q12, n1DP, n2DP, nstep);
+	  for(i=0; i<DIMS; i++)
+	    for(j=0; j<DIMS; j++)
+	      monomers[n1].stress[i][j] += q12[i]* force[j] * sphere_pm->monmass;
+	}
+	/* DP - Tube EV force */
+	else {
+	  Eval_EVForce(force, 1, sphere_pm->kT, sphere_pm->eps, sigma, sigma_LJ, aev, aev_alpha, v, q12mag, q12, n1DP, n2DP, nstep);
+	  for(i=0; i<DIMS; i++)
+	    for(j=0; j<DIMS; j++)
+	      monomers[n1].stress[i][j] += q12[i]* force[j] * sphere_pm->monmass;
+	}
+      }
+      else {
+	/* polymer - DP force */
+	if(n2DP < sphere_pm->NDP) {
+	  Eval_EVForce(force, 1, polym_pm->kT, polym_pm->eps, sigma, sigma_LJ, aev, aev_alpha, v, q12mag, q12, n1DP, n2DP, nstep);
+	  for(i=0; i<DIMS; i++)
+	    for(j=0; j<DIMS; j++)
+	      monomers[n1].stress[i][j] += q12[i]* force[j] * polym_pm->monmass;
+	} 
+	/* polymer - polymer force */
+	else if(n2 < num_beads) {
+	  Eval_EVForce(force, polym_pm->ev_type, polym_pm->kT, polym_pm->eps, sigma, sigma_LJ, aev, aev_alpha, v, q12mag, q12, n1DP, n2DP, nstep);
+	  for(i=0; i<DIMS; i++)
+	    for(j=0; j<DIMS; j++)
+	      monomers[n1].stress[i][j] += q12[i]* force[j] * polym_pm->monmass;
+	}
+	/* polymer - tube force */
+	else {
+	  sigma = 1.0;
+	  sigma_LJ=sigma;
+	  Eval_EVForce(force, 1, polym_pm->kT, polym_pm->eps, sigma, sigma_LJ, aev, aev_alpha, v, q12mag, q12, n1DP, n2DP, nstep);
+	  for(i=0; i<DIMS; i++)
+	    for(j=0; j<DIMS; j++)
+	      monomers[n1].stress[i][j] += q12[i]* force[j] * polym_pm->monmass;
+	}
+      }
+      
+      for(i=0; i<DIMS; i++) {
+	monomers[n1].force[i] -= force[i];
+	monomers[n1].evforce[i] -= force[i];
+      }
+      
+      //if(EV_DEBUG == 1) 
+      //	printf("Test 3 n1 %ld (%le %le %le) n2 %d (%le %le %le) force (%le %le %le)\n", n1, monomers[n1].pos_pbc[0], monomers[n1].pos_pbc[1], monomers[n1].pos_pbc[2], n2, monomers[n2].pos_pbc[0], monomers[n2].pos_pbc[1], monomers[n2].pos_pbc[2], force[0], force[1], force[2]);
+    }
+    
+    free(force);
+  }
+}
+
+void Eval_EVForce(double *force, int ev_type, double kT, double eps0, double sigma, double sigmatmp, double aev, double aev_alpha, double v, double q12mag, double *q12, int n1DP, int n2DP, int nstep)
+{
+  int i, flag;
+  double eps, cutoff;
+  double aterm, sigma_LJ; 
+
+  sigma_LJ = sigmatmp;
+
+  if(ev_type ==0) 
+    for(i=0; i<DIMS; i++)
+      force[i]=0.0;
+
+  /* WCA potential */
+  else if(ev_type ==1) {
+    sigma_LJ = 1.0*sigma;
+    cutoff = 1.12*sigma;
+    eps = kT/sigma;
+	    
+    if(q12mag > cutoff) 
+      for(i=0; i<DIMS; i++)
+	force[i]=0.0;
+    else if(q12mag < cutoff) {
+      aterm = (sigma/q12mag);
+      aterm = aterm*aterm*aterm*aterm*aterm*aterm;
+      
+      for(i=0; i<DIMS; i++) 
+	force[i]=-24.0*(eps*(2.0*(aterm*aterm)-aterm)) * q12[i]/q12mag/q12mag;
+      /*
+	if(q12mag <= sigma && q12mag >=0.8*sigma) {
+	for(i=0; i<DIMS; i++) 
+	force[i]=-4.0*eps*(190.0-(q12mag-0.8*sigma)*920.0/sigma) * q12[i]/q12mag;
+	}
+      */
+    }
+  }
+	
+  else if(ev_type ==2) {
+    aterm = aev/aev_alpha * exp(-q12mag*q12mag/aev_alpha);
+    for(i=0; i<DIMS; i++) 
+      force[i]= (-v*kT*aterm*q12[i]);
+  }
+	  
+  /* L-J potential */
+  /* sigma_LJ = 0.453 sigma is where the minimum position of a bead from a face is at 0.25sigma */
+  /* Use stronger repulsion from 1.12 sigmaLJ to prevent overlap */
+  /* for ev_type 3, apply repulsion every few steps */
+  else if(ev_type ==3) {
+    if(n1DP != n2DP) {
+      sigma_LJ = sigmatmp;
+      eps = eps0*kT/sigma_LJ;
+
+      /* relax the attraction every N steps for (N-N1+1) steps (nstep+1)%N < N1. Default N=1, N1=1*/
+      if((nstep+1)%100 < 99) 
+	cutoff = 2.5*sigma;  // cutoff uses sigma for longer ranged interaction 
+      else 
+	cutoff = 1.12*sigma_LJ;  // cutoff uses sigma for longer ranged interaction 
+
+      /* replace the point-point potential with the point-to-face potential */
+      //      check_overlap(monomers, face, sphere, sphere_pm,  sigma_LJ);
+
+    }
+    else {
+      sigma_LJ=sigma;
+      cutoff = 1.12*sigma;
+      eps = kT/sigma_LJ;
+      flag = 0;
+    }
+    
+    /* Test to allow attracting beads contact distance to be sigma_LJ*/
+    if(q12mag > cutoff) 
+      for(i=0; i<DIMS; i++)
+	force[i]=0.0;
+    else if(q12mag < cutoff) {
+      aterm = (sigma_LJ/q12mag);
+      aterm = aterm*aterm*aterm*aterm*aterm*aterm;
+      /* vdW surface-surface attraction W~ -1/r^2 , 12-2 potential */
+      //aterm = (sigma_LJ/q12mag);
+      //aterm = aterm*aterm;      
+      
+      /* LJ attraction 12-6 potential */
+      for(i=0; i<DIMS; i++) 
+	force[i]=-24.0*(eps*(2.0*(aterm*aterm)-aterm)) * q12[i]/q12mag/q12mag;
+      
+      /* Allow inter-particle bond to break if the stress is large */
+    }
+  }
+}
+
+
+
+/* Calculate spring force : type = 0 FENE, 1 WLC */
+void wall_force(struct DP_param *DP_pm, struct monomer *monomers, int n0, int nf)
+{
+  extern int n_proc;
+  extern int num_x;
+  extern int max_x, max_y, max_z;
+  extern int wall_flag;
+  long n1, n2;
+  Float wall_aev;
+  Float wally, wallz;
+  double maxsize[DIMS];
+  FILE *stream;
+
+  maxsize[0]=(double)max_x;
+  maxsize[1]=(double)max_y;
+  maxsize[2]=(double)max_z;
+  
+  if(monomers[0].radius*3 > 1.0) {
+    //    wally = (maxsize[1]-1.0)/2.0-monomers[0].radius;
+    //    wallz = (maxsize[2]-1.0)/2.0-monomers[0].radius;
+    wally = (maxsize[1]-1.0)/2.0-1.2-1.0;
+    wallz = (maxsize[2]-1.0)/2.0-1.2-1.0;
+    wall_aev = 25.0*DP_pm->kT/(DP_pm->sigma_k*DP_pm->sigma_k*DP_pm->sigma_k);
+  }
+  else {
+    wally = (maxsize[1]-1.0)/2.0-1.0;
+    wallz = (maxsize[2]-1.0)/2.0-1.0;
+    wall_aev = 25.0*DP_pm->kT/(DP_pm->sigma_k*DP_pm->sigma_k*DP_pm->sigma_k);
+  }
+
+#pragma omp parallel for num_threads(NTHREAD)
+  for(n1=n0; n1<nf; n1++) {
+    int j;
+    Float force[DIMS], monpos[DIMS];
+
+    if((int)(monomers[n1].pos[0]/num_x) == n_proc)
+    monpos[0] = monomers[n1].pos[0] - ((maxsize[0]-1.0)/2.0+1.0);
+    for(j=1; j<DIMS; j++)
+      monpos[j] = monomers[n1].pos[j] - ((maxsize[j]-1.0)/2.0);
+
+    if(wall_flag >= 1) {
+      if(monpos[1] < -wally)
+	force[1] = wall_aev * (monpos[1]+wally)*(monpos[1]+wally);
+      else if(monpos[1] > wally)
+	force[1] = -wall_aev * (monpos[1]-wally)*(monpos[1]-wally);
+      else
+	force[1]=0.0;
+      
+      monomers[n1].force[1] += force[1];
+
+      if(fabs(monpos[1]) > (maxsize[1]-1.0)/2.0) {
+	printf(" bead %ld out of ybounds, pos=%le %le %le \n", n1, monomers[n1].pos[0], monomers[n1].pos[1], monomers[n1].pos[2]);
+	printf(" fluid velocity = %le %le %le  vel=%le %le %le\n", monomers[n1].fluid_vel[0], monomers[n1].fluid_vel[1], monomers[n1].fluid_vel[2], monomers[n1].vel[0], monomers[n1].vel[1], monomers[n1].vel[2]);
+	printf(" force = %le %le %le internal force=%le %le %le\n", monomers[n1].force[0], monomers[n1].force[1], monomers[n1].force[2], monomers[n1].f_int[0], monomers[n1].f_int[1], monomers[n1].f_int[2]);
+	printf(" wall force = %le \n", force[1]);
+	exit(18);
+      }
+
+      if(wall_flag == 2) {
+	if(monpos[2] > wallz)
+	  force[2] = -wall_aev * (monpos[2]-wallz)*(monpos[2]-wallz);
+	else if(monpos[2] < -wallz)
+	  force[2] = wall_aev * (monpos[2]+wallz)*(monpos[2]+wallz);
+	else
+	  force[2] = 0.0;
+	
+	monomers[n1].force[2] += force[2];
+	
+	if(fabs(monpos[2]) > (maxsize[2]-1.0)/2.0) {
+	  printf(" bead %ld out of zbounds, pos=%le %le %le \n", n1, monomers[n1].pos[0], monomers[n1].pos[1], monomers[n1].pos[2]);
+	  printf(" fluid velocity = %le %le %le  vel=%le %le %le\n", monomers[n1].fluid_vel[0], monomers[n1].fluid_vel[1], monomers[n1].fluid_vel[2], monomers[n1].vel[0], monomers[n1].vel[1], monomers[n1].vel[2]);
+	  printf(" force = %le %le %le internal force=%le %le %le\n", monomers[n1].force[0], monomers[n1].force[1], monomers[n1].force[2], monomers[n1].f_int[0], monomers[n1].f_int[1], monomers[n1].f_int[2]);
+	  printf(" wall force = %le %le\n", force[1], force[2]);
+	  exit(18);
+	}
+      }
+    }
+  }
+}
+
+/* Hydrodynamic forces */
+void  hi_force(struct DP_param *sphere_pm, struct DP_param *polym_pm, struct DP_param *cyl_pm, struct monomer *mon, Float ***velcs_df, int **node_map, VSLStreamStatePtr rngstream)
+{
+  extern struct vector f_ext;
+  extern int n_proc, num_proc, num_x;
+  extern int max_x, max_y, max_z;
+  extern int wall_flag;
+  extern int add_noise;
+  extern int backflow_flag;
+  static int MD_tau=0;
+
+  int nbeads_sph = sphere_pm->num_beads;
+  int nbeads_poly = polym_pm->num_beads;
+  int nbeads_cyl = cyl_pm->num_beads;
+  //  int totalbeads = nbeads_sph+nbeads_poly+nbeads_cyl;
+  int totalbeads = nbeads_sph+nbeads_poly;
+  int DPbeads = nbeads_sph+nbeads_poly;
+  double fric_sph = sphere_pm->fric;
+  double fric_poly = polym_pm->fric;
+  double fric_cyl = cyl_pm->fric;
+  double mass_sph = sphere_pm->monmass; 
+  double mass_poly = polym_pm->monmass; 
+  double mass_cyl = cyl_pm->monmass; 
+  double dt = sphere_pm->dt;
+  int tau = sphere_pm->MD_steps;
+  double mon_mass, fric;
+
+  int mon_proc, nproc;
+  int cyl_flag; 
+  int i, j, k, q, d;
+  long n0, n1, ni, nxy;
+  int x[DIMS], x1[DIMS];
+  int maxsize[DIMS];
+  double x2[DIMS];
+  double temp[DIMS];
+  double radius = mon[0].radius;
+  double sigma = 2.0*radius;
+  Float *fforce;
+
+  maxsize[0]=max_x;
+  maxsize[1]=max_y;
+  maxsize[2]=max_z;
+  
+  
+  fforce=(Float *)calloc(DIMS*DPbeads, sizeof(Float));
+  if(fforce == 0) fatal_err("cannot allocate force", -1);
+  
+  for (n1=0; n1 < DPbeads; n1++){
+    for(d=0; d<DIMS; d++)
+      fforce[n1*DIMS+d] = 0.0;
+  }
+
+  /* calculate drag force */
+  /* calculate fluid velocity at the monomer coords. */
+  n0 = 0;
+
+#pragma omp parallel for num_threads(NTHREAD)
+  for(n1=n0; n1< totalbeads; n1++) {
+    double fric, mon_mass;
+    int ni, d, x[DIMS]; 
+    double vel[DIMS];
+
+    if(n1 < nbeads_sph) {
+      mon_mass = mass_sph;
+      fric = fric_sph;
+    }
+    else if(n1 < DPbeads) {
+      mon_mass = mass_poly;
+      fric = fric_poly;
+    }
+    else {
+      mon_mass = mass_cyl;
+      fric = fric_cyl;
+    }
+
+    if(n1 < DPbeads) {
+      ni = n1-n0;
+      for(d=0; d<DIMS; d++)
+	x[d] = mon[n1].pos[d];
+      
+      fluid_vel(n1, node_map, vel, x, velcs_df, mon);
+      
+      for(d=0; d<DIMS; d++) {
+	mon[n1].fluid_vel[d]=vel[d];
+	mon[n1].fricforce[d]=-fric*(mon[n1].vel[d]-vel[d]);
+      }
+    }
+    else {
+      for(d=0; d<DIMS; d++) {
+	mon[n1].fluid_vel[d]=0.0;
+	mon[n1].fricforce[d]=-fric*mon[n1].vel[d];
+      }
+    }
+  }
+
+  /* Generate the random force for DP, add_noise = 1 (Brownian particles), 2 (particle + fluid), 3 (fluid only) only for DP */
+  if(add_noise >= 1 && add_noise !=3) 
+    fluc_force(fforce, mon[0].stdev, DPbeads*DIMS, rngstream);
+  
+  /* propagation back to the fluid */
+  n0 = 0; 
+  
+  //#pragma omp parallel for num_threads(NTHREAD)
+  for(n1=n0; n1 < totalbeads; n1++) {
+    int ni, nxy, d, i, j, k, q;
+    int x[DIMS], x1[DIMS]; 
+    double mon_mass, fric; 
+    double force[DIMS]; 
+    double x2[DIMS], dj_temp[DIMS], dmomentum[Num_Dir], temp[DIMS];
+    
+    if(n1 < nbeads_sph) {
+      mon_mass = mass_sph;
+      fric = fric_sph;
+    }
+    else if(n1 < DPbeads) {
+      mon_mass = mass_poly;
+      fric = fric_poly;
+    }
+    else {
+      mon_mass = mass_cyl;
+      fric = fric_cyl;
+    }
+
+    ni = n1-n0;
+    for(d=0; d<DIMS; d++) {
+      x[d] = (int)floor(mon[n1].pos[d]);               /* 0 <= floor(monomer position) <= max_size-1 */
+      x2[d]=mon[n1].pos[d]-(double)x[d];   /* translate the coordinates of the monomer */
+    }
+
+  //    mon_proc = box(x[0],maxsize[0])/num_x;
+  //    if(n_proc == mon_proc) {
+    for(d=0; d<DIMS; d++) 
+      force[d] = Rho_Fl*mon[n1].fricforce[d];
+
+    if(n1 < DPbeads){
+      for(d=0; d<DIMS; d++) {
+        force[d] += fforce[ni*DIMS+d];
+        mon[n1].f_fluc[d]=fforce[ni*DIMS+d];
+        mon[n1].force[d] +=force[d];
+      }
+    }
+
+    for(d=0; d<DIMS; d++) 
+      dj_temp[d]=-force[d]*dt/(mon_mass*CS2*Rho_Fl);
+    
+    for(q=0; q<Num_Dir; q++) 
+      dmomentum[q] = fac[q]*(c_x[q] * dj_temp[0] + c_y[q] * dj_temp[1] + c_z[q] * dj_temp[2]);
+    
+    for(k=0; k<=1; k++) {
+      x1[2]=box(x[2]+k, maxsize[2])+1.0;
+      
+      if(k==0) 
+	temp[2]=(1-x2[2]);
+      else  
+	temp[2]=x2[2];
+      for(j=0; j<=1; j++) {
+	x1[1]=box(x[1]+j, maxsize[1])+1.0;
+	
+	if(j==0) 
+	  temp[1]=(1-x2[1]);
+	else 
+	  temp[1]=x2[1];
+	
+	for(i=0; i<=1; i++) { 
+	  x1[0]=box((x[0]+i), maxsize[0])%num_x+1.0;
+	  
+	  if(i==0) 
+	    temp[0]=1-x2[0];
+	  else 
+	    temp[0]=x2[0];
+	  
+	  nxy = x1[0]*(max_y+2)+x1[1];
+	  for(q=0; q<DIMS; q++)
+	    velcs_df[nxy][q][x1[2]] += dmomentum[q]*temp[0]*temp[1]*temp[2]; 
+	} 
+      } 
+    } 
+  }
+  
+  if(MD_tau == tau)
+    MD_tau =1;
+  else 
+    MD_tau++;
+
+  //  free(force);
+  free(fforce);
+}
+
+void fluid_vel(int n1, int **node_map, double *vel, int x[DIMS], Float ***velcs_df, struct monomer *mon)
+{
+  extern int wall_flag;
+  extern int max_x, max_y, max_z;
+  extern int num_x;
+
+  int i,j,k;
+  int d,q,n,nxy;
+  int x1[DIMS], maxsize[DIMS];
+  double x2[DIMS];
+  double vel_node[8][DIMS], rho_node[8];
+  double temp[DIMS];
+  double rho;
+  
+  maxsize[0]=max_x;
+  maxsize[1]=max_y;
+  maxsize[2]=max_z;
+
+  for(i=0; i<8; i++)
+    rho_node[i]=0.0;
+
+  for(k=0; k<=1; k++) {
+    x1[2] = box(x[2]+k, maxsize[2])+1;
+
+    for(j=0; j<=1; j++) {
+      x1[1] = box(x[1]+j, maxsize[1])+1;
+	    
+      for(i=0; i<=1; i++) {
+	x1[0] = box((x[0]+i), maxsize[0])%num_x+1.0;
+      
+	nxy = x1[0]*(maxsize[1]+2)+(x1[1]);
+	
+	n=i*4+j*2+k;
+	
+	rho_node[n]=0.0;
+	for(d=0; d<DIMS; d++)
+	  vel_node[n][d]=0.0;
+	
+	/* calculate fluid velocity only if the lattice is not solid */
+	if(node_map[nxy][x1[2]] != 1) {
+	  for(q=0; q<Num_Dir; q++) { 
+	    rho_node[n]   +=velcs_df[nxy][q][x1[2]];
+	    vel_node[n][0]+=c_x[q]*velcs_df[nxy][q][x1[2]];
+	    vel_node[n][1]+=c_y[q]*velcs_df[nxy][q][x1[2]];
+	    vel_node[n][2]+=c_z[q]*velcs_df[nxy][q][x1[2]];
+	  }
+	  for(d=0; d<DIMS; d++)
+	    vel_node[n][d] /= rho_node[n];
+	}
+      }
+    }
+  }
+
+  /* wall boundary conditions */
+  if(wall_flag >= 1) { 
+    if(x[1] == 0) 
+      for(i=0; i<=1; i++) 
+	for(k=0; k<=1; k++) 
+	  for(d=0; d<DIMS; d++)
+	    vel_node[i*4+k][d]=-vel_node[i*4+2+k][d];
+    
+    if(x[1] == maxsize[1]-1) 
+      for(i=0; i<=1; i++)
+	for(k=0; k<=1; k++) 
+	  for(d=0; d<DIMS; d++)
+	    vel_node[i*4+2+k][d]=-vel_node[i*4+k][d];
+  }
+
+  if(wall_flag == 2) { 
+    if(x[2] == 0) 
+      for(i=0; i<=1; i++) 
+	for(j=0; j<=1; j++) 
+	  for(d=0; d<DIMS; d++)
+	    vel_node[i*4+j*2][d]=-vel_node[i*4+j*2+1][d];
+    
+    if(x[2] == maxsize[2]-1) 
+      for(i=0; i<=1; i++)
+	for(j=0; j<=1; j++) 
+	  for(d=0; d<DIMS; d++)
+	    vel_node[i*4+j*2+1][d]=-vel_node[i*4+j*2][d];
+  }
+  
+  /* Use trilinear interpolation to get the fluid velocity at the monomer position */
+  for(d=0; d<DIMS; d++) {
+    vel[d] = 0.0;
+    x2[d]=mon[n1].pos[d]-(double)x[d];   /* translate the coordinates of the monomer */
+  }
+
+  for(k=0; k<=1; k++) {
+    if(k==0) 
+      temp[2]=1.0-x2[2];
+    else 
+      temp[2]=x2[2];
+    
+    for(j=0; j<=1; j++) {
+      if(j==0) 
+	temp[1]=1.0-x2[1];
+      else 
+	temp[1]=x2[1];
+      
+      for(i=0; i<=1; i++) { 
+	if(i==0) 
+	  temp[0]=1.0-x2[0];
+	else 
+	  temp[0]=x2[0];
+	
+	n=4*i+2*j+k;
+	for(d=0; d<DIMS; d++) 
+	  vel[d]+=vel_node[n][d]*temp[0]*temp[1]*temp[2];
+      }
+    }
+  }
+
+  //  for(d=0; d<DIMS; d++)    
+  //    vel[ni][d] /= Rho_Fl;
+}
+
+void fluc_force(Float *force, double mon_stdev, int n, VSLStreamStatePtr rngstream)
+{
+  int errcode;
+
+  /* Calculate the fluctuations */  
+  errcode=vdRngGaussian( METHOD, rngstream, n, force, 0.0, mon_stdev);
+  CheckVslError(errcode);
+
+  //  printf("%le %le %le\n", f_fluc[0], f_fluc[1], f_fluc[2]);  
+}
+
+
+/* check for overlap between DP */
+/* if a bead penetrate another DP, move it back outside, reflect boundary condition */
+void Eval_faceforce(struct face *face, struct DP *DP, struct monomer *mon, struct DP_param *sphere_pm, double sigma, double sigma_LJ)
+{
+  const int stack = 6;
+  extern int max_x, max_y, max_z;
+  extern int wall_flag;
+  int n1;
+  int maxsize[DIMS];
+  int flag = 0;
+  double dt = sphere_pm->dt;
+  double h_dt = dt/2.0;
+  double h_dt2= h_dt*h_dt;
+  double cutoff = 2.5*sigma;  // 2.5*sigma ?
+  double cutoff2 = cutoff*cutoff;
+  
+  maxsize[0]=max_x;
+  maxsize[1]=max_y;
+  maxsize[2]=max_z;
+
+  /* find the faces bead n1 is closest to */
+//#pragma omp parallel for num_threads(NTHREAD) 
+  for(n1=0; n1<sphere_pm->num_beads; n1++) {
+    int n, n2, i, j, d, q, k, flag;
+    int p1, p2, p3;
+    int min_face[stack], min_bead[stack];
+    double com[DIMS], com_tmp[DIMS], min_com[stack][DIMS], mincom_tmp[stack][DIMS];
+    double d_com[DIMS]; 
+    double q12[DIMS], q21[DIMS], q31[DIMS], q32[DIMS];
+    double normal[stack][DIMS];
+    double dr, dr1, dr2; 
+    double mon_mass;
+    double temp, h, h1, normalmag;
+    double min_face_dr[stack];
+    double min_dcom[stack][DIMS], min_d2com[stack][DIMS];
+
+    for(q=0; q<stack; q++) {
+      min_face[q] = -1;
+      min_face_dr[q] =100;
+      min_bead[q] = sphere_pm->num_beads+1;
+    }
+
+    for(n=1; n <= mon[n1].list[0]; n++) {
+      n2 = mon[n1].list[n];
+
+      if(n2 < sphere_pm->num_beads && (mon[n1].DP_id != mon[n2].DP_id)) {
+	dr2=0.0;
+	for(d=0; d<DIMS; d++) {
+	  temp=mon[n1].pos_pbc[d] - mon[n2].pos_pbc[d];
+	  if ((d==0 && wall_flag<3) || (d==2 && wall_flag<2) || (d==1 && wall_flag<1))
+	    temp=n_image(temp, maxsize[d]);
+	  dr2+=temp*temp;
+	}
+	
+	if(dr2 > cutoff2) 
+	  continue;
+	else {
+	  for(i=1; i<=mon[n2].face_id[0]; i++) {
+	    flag = 0;
+	    /* check if face has already been looped.  If so, skip */
+	    for(k=0; k<stack; k++) 
+	      if(mon[n2].face_id[i] == min_face[k]) {
+		flag = 1;
+		break;
+	      }
+	    if(flag == 1) continue;
+
+	    for(d=0; d<DIMS; d++) {
+	      com[d] = 0.0;
+	      for(j=0; j<3; j++)
+		com[d]+=mon[face[mon[n2].face_id[i]].vertices[j]].pos_pbc[d];
+	      com[d]/=3.0;
+	    }
+	    
+	    dr=0.0;
+	    for(d=0; d<DIMS; d++) {
+	      temp = mon[n1].pos_pbc[d] - com[d];
+	      if ((d==0 && wall_flag<3) || (d==2 && wall_flag<2) || (d==1 && wall_flag<1))
+		d_com[d]=n_image(temp, maxsize[d]);
+	      else
+		d_com[d]=temp;
+
+	      dr += d_com[d]*d_com[d];
+	    }
+
+	    dr = sqrt(dr);
+
+	    if(dr < min_face_dr[stack-1]) {
+	      min_face_dr[stack-1] = dr;
+	      min_bead[stack-1] = n2;
+	      min_face[stack-1] = mon[n2].face_id[i];
+	      
+	      for(d=0; d<DIMS; d++) {
+		min_com[stack-1][d]=com[d];
+		mincom_tmp[stack-1][d]=com_tmp[d];
+		min_dcom[stack-1][d]=d_com[d];
+		
+		temp = mon[n1].pos_tmp[d] - mincom_tmp[stack-1][d];
+		if ((d==0 && wall_flag<3) || (d==2 && wall_flag<2) || (d==1 && wall_flag<1))
+		  min_d2com[stack-1][d]=n_image(temp, maxsize[d]);
+		else
+		  min_d2com[stack-1][d]=temp;
+	      }
+	    }
+	  
+	    for(q=stack-2; q>=0; q--) {
+	      if(dr < min_face_dr[q]) {
+		min_face_dr[q+1] = min_face_dr[q];
+		min_bead[q+1] = min_bead[q];
+		min_face[q+1] = min_face[q];
+
+		min_face_dr[q] = dr;
+		min_bead[q] = n2;
+		min_face[q] = mon[n2].face_id[i];
+
+		for(d=0; d<DIMS; d++) {
+		  min_com[q+1][d]=min_com[q][d];
+		  mincom_tmp[q+1][d]= mincom_tmp[q][d];
+		  min_dcom[q+1][d]=min_dcom[q][d];
+		  min_d2com[q+1][d] = min_d2com[q][d];
+
+		  min_com[q][d]=com[d];
+		  mincom_tmp[q][d]=com_tmp[d];
+		  min_dcom[q][d]=d_com[d];
+	
+		  temp = mon[n1].pos_tmp[d] - mincom_tmp[q][d];
+		  if ((d==0 && wall_flag<3) || (d==2 && wall_flag<2) || (d==1 && wall_flag<1))
+		    min_d2com[q][d]=n_image(temp, maxsize[d]);
+		  else
+		    min_d2com[q][d]=temp;
+		}
+	      }
+	    }
+	  }
+	}
+      }
+    }
+      
+    /* if there are no nearby faces, continue to next bead */
+    if(min_face_dr[0] == 100 || min_face[0] == -1) {
+      flag = 0;
+      continue;
+    }
+
+    for(q=0; q<stack; q++) {
+      if(min_face[q] == -1) continue;
+
+      /* loop over all vertices of closest face */
+      p1 = face[min_face[q]].vertices[0];
+      p2 = face[min_face[q]].vertices[1];
+      p3 = face[min_face[q]].vertices[2];
+      for (d=0 ; d<DIMS ; d++)
+	q21[d] = mon[p2].pos_pbc[d] - mon[p1].pos_pbc[d];
+      for (d=0 ; d<DIMS ; d++)
+	q31[d] = mon[p3].pos_pbc[d] - mon[p1].pos_pbc[d];
+      for (d=0 ; d<DIMS ; d++)
+	q32[d] = mon[p3].pos_pbc[d] - mon[p2].pos_pbc[d];
+      
+      product(q21, q31, normal[q]);
+    
+      normalmag = 0.0;
+      for(d=0; d<DIMS; d++)
+	normalmag += normal[q][d]*normal[q][d];
+      normalmag = sqrt(normalmag);
+      
+      for(d=0; d<DIMS; d++)
+	normal[q][d] /= normalmag;
+    
+      /* determine the sign of the normal by comparing with distance of n1+normal from particle center */
+      for(d=0; d<DIMS; d++) {
+	com[d] = DP[mon[min_bead[q]].DP_id].com[d];
+	com_tmp[d] = DP[mon[n1].DP_id].com[d];
+      }
+      
+      /* determine whether the normal points in or out */
+      dr1=0.0;
+      double normaldotdr1 = 0.0;
+      for(j=0; j<DIMS; j++) {
+	temp = mon[n1].pos_pbc[j]-com[j];
+	dr1+=temp*temp;
+	normaldotdr1 += temp*normal[q][j];
+      }
+      dr1=sqrt(dr1);
+      normaldotdr1 /= dr1;
+      if(normaldotdr1 < 0.0) normaldotdr1 = -normaldotdr1;
+
+      dr2=0.0;
+      for(j=0; j<DIMS; j++) {
+	temp = mon[n1].pos_pbc[j]-com[j]+dr1/2.0*normal[q][j];
+	dr2+=temp*temp;
+      }
+      
+      dr2 = sqrt(dr2);
+
+      /* added condition to check for pinched concave surface */
+      /* if cosine between the face normal and the COM-to-face vector < 0.5 */
+      /* use the particle of n1 to determine the normal sign*/
+      if(normaldotdr1 < 0.5) {
+	for(j=0; j<DIMS; j++) {
+	  temp = mon[n1].pos_pbc[j]-com_tmp[j];
+	  dr1+=temp*temp;
+	  normaldotdr1 += temp*normal[q][j];
+	}
+	dr1=sqrt(dr1);
+
+	dr2=0.0;
+	for(j=0; j<DIMS; j++) {
+	  temp = mon[n1].pos_pbc[j]-com_tmp[j]+dr1/2.0*normal[q][j];
+	  dr2+=temp*temp;
+	}
+      
+	dr2 = sqrt(dr2);
+
+	if(dr2 > dr1) 
+	  for(d=0; d<DIMS; d++)
+	    normal[q][d] = -1.0 * normal[q][d];
+      }
+      else {
+	if(dr1 > dr2) 
+	  for(d=0; d<DIMS; d++)
+	    normal[q][d] = -1.0 * normal[q][d];
+      }
+	
+      /* determine the normal distance of bead to face */
+      h=normal[q][0]*min_dcom[q][0]+normal[q][1]*min_dcom[q][1]+normal[q][2]*min_dcom[q][2];
+      h1=normal[q][0]*min_d2com[q][0]+normal[q][1]*min_d2com[q][1]+normal[q][2]*min_d2com[q][2];
+
+      if(h < sigma_LJ) {
+	if(EV_DEBUG == 1)
+	  printf("faceEV n1 %d n2 %d (%le %le %le) face %d dr %lf h=%lf\n", n1, min_bead[q], mon[min_bead[q]].pos_pbc[0], mon[min_bead[q]].pos_pbc[1], mon[min_bead[q]].pos_pbc[2], min_face[q], sqrt(min_face_dr[q]), h);
+
+	face_force(sigma_LJ, n1, p1, p2, p3, h, normal[q], sphere_pm, mon);
+      }
+
+      /* Reflect bead position across face */
+      /*
+	if(h <  -1.0e-9)  {
+	flag = 1;
+	mon_mass = Rho_Fl*sphere_pm->monmass;
+	
+	for(j=0; j<DIMS; j++) {
+	mon[n1].pos_pbc[j] -= h*normal[j];
+	mon[n1].pos[j]=box(mon[n1].pos_pbc[j], maxsize[j]);
+	}
+	}
+      */
+    }
+  }
+}
+
+
+/*  Replaced by check_overlap between bead and neighboring DP in verlet_update */
+/*  Adding repulsion between a bead and a nearby face */
+void face_force(double sigma_LJ, int n1, int p1, int p2, int p3, double htemp, double *normal, struct DP_param *sphere_pm, struct monomer *mon)
+{
+  int i,j, d;
+  double dt = sphere_pm->dt;
+  double eps = sphere_pm->eps*sphere_pm->kT/sigma_LJ;
+  double aterm, h, num1, num2, num3, det, sum;
+  double pos[DIMS], force[DIMS];
+  double p1x,p2x,p3x,p1y,p2y,p3y,p1z,p2z,p3z;
+
+  if(htemp < 0) h = -htemp;
+  else h = htemp;
+  aterm = (sigma_LJ/h);
+  aterm = aterm*aterm;
+  aterm = aterm*aterm*aterm;
+
+  /* Calculate the force distribution onto the neighbor face and apply face force */
+  for(d=0; d<DIMS; d++) 
+    pos[d] = mon[n1].pos[d]-h*normal[d];
+
+  p1x = mon[p1].pos_pbc[0];   p2x = mon[p2].pos_pbc[0]; p3x = mon[p3].pos_pbc[0];
+  p1y = mon[p1].pos_pbc[1];   p2y = mon[p2].pos_pbc[1]; p3y = mon[p3].pos_pbc[1];
+  p1z = mon[p1].pos_pbc[2];   p2z = mon[p2].pos_pbc[2]; p3z = mon[p3].pos_pbc[2];
+  
+  det = p1x*(p2y*p3z-p3y*p2z)+p1y*(p3x*p2z-p2x*p3z)+p1z*(p2x*p3y-p3x*p2y);
+  num1 = (pos[0]*(p2y*p3z-p3y*p2z)+pos[1]*(p2z*p3x-p3z*p2x)+pos[2]*(p3y*p2x-p2y*p3x))/det;
+  num2 = (pos[0]*(p3y*p1z-p3z*p1y)+pos[1]*(p3z*p1x-p1z*p3x)+pos[2]*(p3x*p1y-p3y*p1x))/det;
+  num3 = (pos[0]*(p1y*p2z-p1z*p2y)+pos[1]*(p1z*p2x-p1x*p2z)+pos[2]*(p1x*p2y-p2x*p1y))/det;
+
+  if(num1 < 0.0 || num2 < 0.0 || num3 < 0.0) 
+    return;
+
+  if(num1 > 1.0 || num2 > 1.0 || num3 > 1.0) 
+    return;
+  
+  sum = num1+num2+num3;
+  num1 /= sum;
+  num2 /= sum;
+  num3 /= sum;
+
+  if(EV_DEBUG == 1) {
+    if(force[0] > 10 || force[0] < -10 || force[1] > 10 || force[1] < -10 || force[2] > 10 || force[2] < -10) {
+      printf("faceEV h=%le (%le %le %le) force (%le %le %le)\n", h, normal[0], normal[1], normal[2], force[0], force[1], force[2]);
+      printf("n1 %d (%le %le %le) \n p1 %d (%le %le %le) \n p2 %d (%le %le %le) \n p3 %d (%le %le %le)\n", n1, mon[n1].pos_pbc[0], mon[n1].pos_pbc[1], mon[n1].pos_pbc[2], p1, mon[p1].pos_pbc[0], mon[p1].pos_pbc[1], mon[p1].pos_pbc[2], p2, mon[p2].pos_pbc[0], mon[p2].pos_pbc[1], mon[p2].pos_pbc[2], p3, mon[p3].pos_pbc[0], mon[p3].pos_pbc[1], mon[p3].pos_pbc[2]);
+      printf("det=%le num1=%le num2=%le num3=%le\n", det, num1, num2, num3);
+    }
+  }
+
+  for(i=0; i<DIMS; i++) {
+  //force[i]= -24.0*(eps*(2.0*(aterm*aterm)-aterm))/h * normal[i];
+    force[i]= -100.0 * (sphere_pm->kT/sigma_LJ) * (sigma_LJ-htemp)*(sigma_LJ-htemp)/(sigma_LJ*sigma_LJ)* normal[i];
+
+    //    force[i]= -24.0*(eps*(2.0*(aterm*aterm)-aterm)) * normal[i];
+    mon[n1].force[i] -= force[i];
+    mon[n1].evforce[i] -= force[i];
+  }
+
+  for (i=0; i<DIMS; i++) {
+    mon[p1].force[i] += force[i]*num1;
+    mon[p2].force[i] += force[i]*num2;
+    mon[p3].force[i] += force[i]*num3;
+    mon[p1].evforce[i] += force[i]*num1;
+    mon[p2].evforce[i] += force[i]*num2;
+    mon[p3].evforce[i] += force[i]*num3;
+  }
+  
+  for(i=0; i<DIMS; i++) 
+    for(j=0; j<DIMS; j++) {
+      mon[n1].stress[i][j] += h*normal[i]* force[j] * sphere_pm->monmass;
+
+      mon[p1].stress[i][j] -= h*normal[i]* force[j] * sphere_pm->monmass * num1;
+      mon[p2].stress[i][j] -= h*normal[i]* force[j] * sphere_pm->monmass * num2;
+      mon[p3].stress[i][j] -= h*normal[i]* force[j] * sphere_pm->monmass * num3;
+    }
+}

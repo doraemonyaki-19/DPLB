@@ -1,0 +1,79 @@
+# Susp3D makefile: parallel version requires MPICH of MP_LITE libraries
+#########################################################################
+# Susp3D: Lattice-Boltzmann simulation code for particle-fluid suspensions
+# Copyright (C) 2003 Tony Ladd
+
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+#########################################################################
+
+# Choose compiler
+CC = icc
+
+# define MKL root
+MKLROOT = /opt/intel/mkl
+
+# Set optimization flags: cc is generic, gcc and icc are for PIII
+CFLAGS_cc  = -O
+#CFLAGS_gcc = -O3 -g -pg -funroll-loops -malign-double -march=i686 -static
+CFLAGS_gcc = -O3 -funroll-loops -fomit-frame-pointer -m64  -static
+CFLAGS_gcc4 = -O3 -funroll-loops -fomit-frame-pointer -malign-double -march=i686 -static
+#CFLAGS_icc = -prof-gen -prof-dir=./profile
+#CFLAGS_icc = -prof-use -prof-dir=./profile -dryrun
+CFLAGS_icc = -O3 -lpthread
+
+# Set linker flags: i.e. mpe libraries or options like -static
+LFLAGS_cc  =
+LFLAGS_gcc = 
+LFLAGS_icc = 
+
+# Should not need to modify makefile below here
+PCC    = /usr/local/mpich-1.2.7p1/bin/mpicc -cc=$(CC)
+#CFLAGS = $(CFLAGS_$(CC)) -c -pg 
+#LFLAGS = $(LFLAGS_$(CC)) -lm -pg
+CFLAGS = $(CFLAGS_$(CC)) -c 
+LFLAGS = $(LFLAGS_$(CC)) -L/usr/local/intel/mkl/10.0.3.020/lib/32 -lmkl_ia32 -lpthread
+IFLAGS = $(IFLAGS_$(CC)) -I/usr/local/intel/mkl/10.0.3.020/include -openmp
+
+
+C_OBJ  = main.o driver.o update.o lbe_update.o \
+	bnodes.o bnodes_init.o bnodes_dp.o bnodes_tube.o \
+	implicit_force.o lbe.o modes_write.o initlbe.o \
+	lub.o velcs_update.o hs3d.o n_list.o objects_init.o objects_map.o \
+ 	clusters.o cluster_force.o cluster_update.o cj_grad.o \
+	global_sums.o utils.o output.o \
+	init_sphere.o init_polymer.o init_cylinder.o ran_num.o get_forces.o verlet_update.o get_forces_cyl.o
+
+.c.o:
+	$(CC)  $(IFLAGS) $(CFLAGS) $*.c
+
+condor: $(C_OBJ)
+	condor_compile $(CC) $(CFLAGS) -c msg_ser.c
+	condor_compile $(CC) -o dplbe.condor $(C_OBJ) msg_ser.o $(LFLAGS)
+
+serial: $(C_OBJ)
+	$(CC)  $(IFLAGS) $(CFLAGS) -c msg_ser.c
+	$(CC)  $(IFLAGS) -o dplbe $(C_OBJ) msg_ser.o $(LFLAGS)
+
+clean:
+	rm -f *.o dplbe 
+
+install:
+	ln -sf dplbe ../bin/dplbe
+	ln -sf dplbe_mpich ../bin/dplbe_mpich
+	ln -sf dplbe_mplite ../bin/dplbe_mplite
+
+all:
+	make clean
+	make install

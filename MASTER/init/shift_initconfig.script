@@ -1,0 +1,19 @@
+# shift the init.config coordinates of y ($2, $5) or z ($3, $6) of spheres (lines a to b) or cylinders (lines >=b)
+
+
+awk '
+BEGIN{lines=a=b=0}{if(lines==0){a=$1+1; b=$5+a; c=a+1284; d=c+1284; e=d+1284; print $1, $2, $3, $4, $5}; 
+
+if((lines <a) && (lines >0)){print $1, $2, $3, $4}; 
+if((lines>=a) && (lines < a+642)){ printf("%e %e %e %e %e %e %e %e %e %e\n", $1-2.0, $2, $3, $4-2.0, $5, $6, $7, $8, $9, $10)};
+if((lines>=a+642) && (lines < c)){ printf("%e %e %e %e %e %e %e %e %e %e\n", $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)};
+if((lines>=c) && (lines < c+642)){ printf("%e %e %e %e %e %e %e %e %e %e\n", $1-2.0, $2, $3, $4-2.0, $5, $6, $7, $8, $9, $10)};
+if((lines>=c+642) && (lines < d)){ printf("%e %e %e %e %e %e %e %e %e %e\n", $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)};
+if((lines>=d) && (lines < d+642)){ printf("%e %e %e %e %e %e %e %e %e %e\n", $1-2.0, $2, $3, $4-2.0, $5, $6, $7, $8, $9, $10)};
+if((lines>=d+642) && (lines < e)){ printf("%e %e %e %e %e %e %e %e %e %e\n", $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)};
+if((lines>=e) && (lines < e+642)){ printf("%e %e %e %e %e %e %e %e %e %e\n", $1-2.0, $2, $3, $4-2.0, $5, $6, $7, $8, $9, $10)};
+if((lines>=e+642) && (lines < b)){ printf("%e %e %e %e %e %e %e %e %e %e\n", $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)};
+if(lines >=b) {printf("%e %e %e %e %e %e %e %e %e %e\n", $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)};
+lines++}
+
+END{}' init.config  > shift_initconfig.dat

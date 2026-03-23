@@ -1,0 +1,426 @@
+/***********************************************************************
+ASLB : Lattice-Boltzmann simulation code for deformable particle+polymer+
+lattice Boltzmann fluid
+Copyright (C) 2019 Yeng-Long Chen
+
+based on 
+Susp3D: Lattice-Boltzmann simulation code for particle-fluid suspensions
+Copyright (C) 2003 Tony Ladd
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+***********************************************************************/
+
+#include "header.h"
+#define DEBUG 0
+
+void bnodes_tube(Float ***velcs_df, int **node_map, struct DP_param *cyl_pm, struct DP *cylinder, struct monomer *monomers, int n0)
+{
+  extern int wall_flag;
+  extern int max_x, max_y, max_z;
+  int m, n;
+  int nxy, nxy1, nxyz;
+  int i, j, k, q, qi;
+  int leftbound, rightbound;
+  int num_beads = cyl_pm->num_beads + n0; 
+  int bnode_flag;
+  int x0, y0, z0, x1, y1, z1, x[DIMS];
+  int size_xy = (max_x+2)*(max_y+2);
+  int size_z= (max_z+2);
+  int ymin, ymax;
+  int tmpnode[(max_x+2)*(max_y+2)][max_z+2];
+  int nnode;
+  double r[DIMS];
+  double maxsize[DIMS];
+  double xm, xp, ym, yp;
+  int xtmp, ytmp, ztmp;
+  int checked_node;
+
+  maxsize[0]=max_x;
+  maxsize[1]=max_y;
+  maxsize[2]=max_z;
+
+
+  /* store the old nodemap and reset the node_map */
+  for(i=0; i<size_xy; i++)
+    for(k=0; k<size_z; k++) {
+      tmpnode[i][k] = node_map[i][k];
+      node_map[i][k] = 1;
+    }
+
+  if(DEBUG == 1)
+    printf("Test 1\n");
+  
+  /* set the eight lattice sites around a cylinder monomer to zero */
+  /* bounds set from 0 to max+1 to account for cylinder nodes in the buffer */
+  for(n=n0; n<num_beads; n++) {
+    for(m=0; m<DIMS; m++)
+      x[m] = (int)(monomers[n].pos[m]) +1 ;
+
+    for(i=0; i<2; i++) {
+      x0 = x[0]+i;
+
+      if(wall_flag < 3) 
+	x0  = (x0+(max_x+1))%(max_x+1);
+
+      if(x0 < 0) x0+=max_x;
+      else if(x0 > max_x+1) x0-=max_x;
+    
+      for(j=0; j<2; j++) {
+	y0 = x[1]+j;
+	
+	if(wall_flag < 1) 
+	  y0  = (y0+(max_y+1))%(max_y+1);
+
+	nxy = x0*(max_y+2)+y0;
+	for(k=0; k<2; k++)  {
+	  z0 = x[2]+k;
+
+	  if(wall_flag < 2) 
+	    z0  = (z0+(max_z+1))%(max_z+1);
+
+	  node_map[nxy][z0] = 0;
+	}
+      }
+    }
+  }
+   
+  /* Scan in y and z*/
+  /* find the upper (right) and lower (left) bounds */
+  for(i=1; i<=max_x; i++) {
+    for(k=0; k<=max_z+1; k++) {
+      leftbound =1;
+      rightbound = 0;
+
+      if(node_map[i*(max_y+2)+max_y][k] == 0)
+  	rightbound = max_y;
+      else {
+  	for(j=max_y+1; j>0; j--) {
+  	  nxy = i*(max_y+2)+j;
+	  
+  	  if(node_map[nxy][k] == 1 && node_map[nxy-1][k] <= 0) {
+  	    rightbound = j-1;
+  	    break;
+  	  }
+  	}
+      }
+      
+      if(node_map[i*(max_y+2)+1][k] == 0)
+  	leftbound = 1;
+      else {
+  	for(j=0; j<=max_y; j++) {
+  	  nxy = i*(max_y+2)+j;
+	  
+  	  if(node_map[nxy][k] == 1 && node_map[nxy+1][k] <= 0) {
+  	    leftbound = j+1;
+  	    break;
+  	  }
+  	}
+      }
+
+      nxy = i*(max_y+2)+leftbound;
+      nxy1 = i*(max_y+2)+rightbound;
+
+      for(j=leftbound; j<=rightbound; j++) {
+  	nxy = i*(max_y+2)+j;
+  	node_map[nxy][k]=-1;
+      }
+
+      nxy = i*(max_y+2)+leftbound;
+      nxy1 = i*(max_y+2)+rightbound;
+    }
+    
+    for(j=1; j<=max_y; j++) {
+      nxy = i*(max_y+2)+j;
+      
+      leftbound =1;
+      rightbound = 0;
+
+      if(node_map[nxy][max_z] == 0 && node_map[nxy][max_z+1] == 0)
+	rightbound = max_z;
+      else {
+	for(k=max_z+1; k>0; k--) {
+	  if(node_map[nxy][k] == 1 && node_map[nxy][k-1] <= 0) {
+	    rightbound = k-1;
+	    
+	    break;
+	  }
+	}
+      }
+      
+      if(node_map[nxy][1] == 0 && node_map[nxy][0] == 0)
+	leftbound = 1;
+      else {
+	for(k=0; k<=max_z; k++) {
+	  if(node_map[nxy][k] == 1 && node_map[nxy][k+1] <= 0) {
+	    leftbound = k+1;
+	    
+	    break;
+	  }
+	}
+      }
+    
+      if(DEBUG == 1) printf("Test 2 i %d j %d left %d %d right %d %d\n", i, j, leftbound, rightbound, node_map[nxy][leftbound], node_map[nxy][rightbound]);
+      for(k=leftbound; k<=rightbound; k++)
+    	node_map[nxy][k] -= 3;
+      if(DEBUG == 1) printf("Test 2A i %d j %d left %d %d right %d %d\n", i, j, leftbound, rightbound, node_map[nxy][leftbound], node_map[nxy][rightbound]);
+
+    }
+  }
+
+  /* if solid node becomes fluid, need to add velocity distribution functions to node */
+  for(i=1; i<=max_x; i++)
+    for(j=1; j<=max_y; j++) {
+      nxy = i*(max_y+2)+j;
+      for(k=1; k<=max_z; k++) {
+	if(node_map[nxy][k] == -4) {
+	  node_map[nxy][k] = 0;
+	  
+	  if(tmpnode[nxy][k] == 1)
+	    for(q=0; q<Num_Dir; q++)
+	      velcs_df[nxy][q][k] = (double)fac[q];
+	  else if(tmpnode[nxy][k] == 2)
+	    node_map[nxy][k] = 2;
+	}
+	else
+	  node_map[nxy][k] = 1;
+      }
+    }
+  
+  /* set periodic boundary conditions */
+  /* +/- x */
+  for(j=0; j<=max_y+1; j++) {
+    nxy = max_x*(max_y+2)+j;
+    nxy1 = (max_y+2)+j;
+    for(k=0; k<=max_z+1; k++)  {
+      node_map[j][k] = node_map[nxy][k];
+      node_map[(max_x+1)*(max_y+2)+j][k] = node_map[nxy1][k];
+    }
+  }
+    
+  /* Bounce-back at the solid-fluid boundaries */
+  /* seek boundary links from the INNER fluid node */
+  /* and store bounce back fluid velocities in solid node */
+  /* X bounce back XY and XZ are treated in Y and Z */
+
+  cyl_pm->bnodes[0][0] = 0;
+  nnode = 0;
+
+  if(DEBUG == 1)
+    printf("Test 1\n");
+
+  for(n=n0; n<num_beads; n++) {
+    /* pbc positions are used so the nodes should be within the box domain (0 to max+1) */
+    for(m=0; m<DIMS; m++)
+      x[m] = (int)(monomers[n].pos[m]) +1 ;
+    
+    for(i=-1; i<=2; i++) {
+      x0 = x[0] + i;
+
+      if(x0 < 0) x0 +=max_x;
+      else if(x0 > max_x+1) x0-=max_x;
+
+      for(j=-1; j<=2; j++) {
+	y0 = x[1]+j;
+
+	if(y0 < 0) y0 +=max_y;
+	else if(y0 > max_y+1) y0-=max_y;
+
+	nxy = x0*(max_y+2)+y0;
+
+	for(k=-1; k<=2; k++)  {
+	  z0 = x[2]+k;
+	      
+	  if(z0 < 0) z0 +=max_z;
+	  else if(z0 > max_z+1) z0-=max_z;
+
+	  nxyz = x0*(max_y+2)*(max_z+2)+y0*(max_z+2)+z0;
+
+	  /* Check if nxy has been looped before */
+	  checked_node = 0;
+	  for(m=1; m<=cyl_pm->bnodes[0][0]; m++)
+	    if(cyl_pm->bnodes[m][0] == nxyz) {
+	      checked_node = 1;
+	      break;
+	    }
+	  if(checked_node == 1)
+	    continue;
+	  
+	  if(node_map[nxy][z0] == 0) {
+	    bnode_flag = 0;
+	    for(q=1; q<Num_Dir; q++) {
+	      x1 = x0+c_x[q];
+	      y1 = y0+c_y[q];
+	      z1 = z0+c_z[q];
+	      
+	      if(x1 < 0) x1 +=max_x;
+	      else if(x1 > max_x+1) x1-=max_x;
+	      if(y1 < 0) y1 +=max_y;
+	      else if(y1 > max_y+1) y1-=max_y;
+	      if(z1 < 0) z1 +=max_z;
+	      else if(z1 > max_z+1) z1-=max_z;
+
+	      /*
+	      if(wall_flag < 3) {
+		if(x1 == 0) x1 = max_x;
+		if(x1 == max_x+1) x1 = 1;
+	      }
+
+	      if(wall_flag < 2) {
+		if(z1 == 0) z1 = max_z;
+		if(z1 == max_z+1) z1 = 1;
+	      }
+	
+	      if(wall_flag < 1) {
+		if(y1 == 0) y1 = max_y;
+		if(y1 == max_y+1) y1 = 1;
+	      }
+	      */
+
+	      nxy1 = x1*(max_y+2)+y1;
+	      
+	      if(node_map[nxy1][z1] == 1) {
+		if(q%2 ==0)  qi=q-1;
+		else qi = q+1;
+		
+		velcs_df[nxy1][qi][z1] = velcs_df[nxy][q][z0];
+
+		if(bnode_flag == 0) {
+		  nnode++;
+		  cyl_pm->bnodes[0][0]=nnode;
+		  cyl_pm->bnodes[nnode][0]=nxyz;
+		  bnode_flag = 1;
+		}
+
+		if(nnode > cyl_pm->nlinks) {
+		  printf("Exceed max # of boundary nodes\n");
+		  exit(375);
+		}
+		
+		cyl_pm->bnodes[nnode][q]=1;
+		
+		if(DEBUG == 1)
+		  printf("def boundary node %d/%d q %d at nxyz %d (%d %d %d) (%d %d %d) (%d %d %d), node_map %d %d\n", nnode, cyl_pm->nlinks, q, cyl_pm->bnodes[nnode][0], nxyz/((max_y+2)*(max_z+2)), (nxyz%((max_y+2)*(max_z+2)))/(max_z+2), (nxyz%((max_y+2)*(max_z+2)))%(max_z+2), x0, y0, z0, x1, y1, z1, node_map[nxy][z0], node_map[nxy1][z1]); 
+	      }
+	    }
+	  }
+	}
+      }
+    }
+  }
+}
+
+
+void bnodes_tube_bb(Float ***velcs_df, int **node_map, struct DP_param *cyl_pm)
+{
+  extern int wall_flag;
+  extern int max_x, max_y, max_z;
+  int n, q, qi, nxy, nxy1;
+  int nxyz, nxyz1, x0, y0, z0, x1, y1, z1;
+
+  nxyz1 = -1;
+  for(n=1; n<cyl_pm->bnodes[0][0]; n++) {
+    nxyz=cyl_pm->bnodes[n][0];
+
+    /* pbc positions are used so the nodes should be within the box domain */
+    if(nxyz != nxyz1) {
+      x0=nxyz/((max_y+2)*(max_z+2));
+      y0=(nxyz%((max_y+2)*(max_z+2)))/(max_z+2);
+      z0=(nxyz%((max_y+2)*(max_z+2)))%(max_z+2);
+      nxy = x0*(max_y+2)+y0;
+    }
+
+    for(q=1; q<Num_Dir; q++) {
+      //      if(cyl_pm->bnodes[n][q] == 1) {
+	x1 = x0+c_x[q];
+	y1 = y0+c_y[q];
+	z1 = z0+c_z[q];
+
+	if(x1 < 0) x1 +=max_x;
+	else if(x1 > max_x+1) x1-=max_x;
+	if(y1 < 0) y1 +=max_y;
+	else if(y1 > max_y+1) y1-=max_y;
+	if(z1 < 0) z1 +=max_z;
+	else if(z1 > max_z+1) z1-=max_z;
+	/*
+	  if(wall_flag < 3) {
+	  if(x1 == 0) x1 = max_x;
+	  if(x1 == max_x+1) x1 = 1;
+	  }
+	  
+	  if(wall_flag < 2) {
+	  if(z1 == 0) z1 = max_z;
+	  if(z1 == max_z+1) z1 = 1;
+	  }
+	  
+	  if(wall_flag < 1) {
+	  if(y1 == 0) y1 = max_y;
+	  if(y1 == max_y+1) y1 = 1;
+	  }
+	*/
+	  
+	//    printf("(%d %d %d) (%d %d %d)\n", x0, y0, z0, x1, y1, z1);
+	
+	nxy1 = x1*(max_y+2)+y1;
+	
+	if(node_map[nxy1][z1] == 1) {
+	
+	  if(q%2 ==0)  qi=q-1;
+	  else qi = q+1;
+	  
+	  velcs_df[nxy1][qi][z1] = velcs_df[nxy][q][z0];
+	}
+	//      }
+    }
+    nxyz1=nxyz;    
+  }
+}
+
+void tube_props_short(struct DP_param *cyl_pm, struct DP *cylinders, struct monomer *mono, int n0)
+{
+  int i, j, k, d, n;
+  int type, index;
+  int Nbeads = cyl_pm->num_beads;
+  int maxsize[DIMS];
+  double temp, tempstretch;
+
+  /* calculate the sphere center-of-mass */
+  for(d=0; d<DIMS; d++) 
+    cylinders[0].tcom[d] = 0.0;
+ 
+  for(j=0; j<Nbeads; j++)
+    for(d=0; d<DIMS; d++) 
+      cylinders[0].tcom[d] += mono[n0+j].pos_pbc[d];
+
+  for(d=0; d<DIMS; d++) 
+    cylinders[0].tcom[d] = cylinders[0].tcom[d]/Nbeads;
+  
+    /* calculate the tube  stretch */
+    /* determine the maximum stretch in x, y, and z */
+  for(d=0; d<DIMS; d++) 
+    cylinders[0].tstretch[d] = 0.0;
+
+  for(j=0; j<Nbeads-1; j++) {
+    for(k=j+1; k<Nbeads; k++) {
+      for(d=0; d<DIMS; d++) {
+	tempstretch = 0.0;
+	
+	temp = mono[n0+k].pos_pbc[d]-mono[n0+j].pos_pbc[d];
+	tempstretch = sqrt(temp*temp);
+	  if(tempstretch > cylinders[0].tstretch[d]) 
+	    cylinders[0].tstretch[d] = tempstretch;
+      }
+    }
+  }
+}
