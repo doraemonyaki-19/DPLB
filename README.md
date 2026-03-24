@@ -489,3 +489,6 @@ GNU General Public License v2.0 or later. See the license headers in source file
 ## Author
 
 Yeng-Long Chen (2019), based on Susp3D by Tony Ladd (2003).
+
+## Related Publications
+https://scholar.google.com/citations?user=KbivulsAAAAJ&hl=en 
