@@ -1,6 +1,6 @@
 # DPLB — Deformable Particle Lattice Boltzmann
 
-A hybrid Lattice Boltzmann Method (LBM) and Molecular Dynamics (MD) simulation code for modeling the flow of soft particles such as polymers and biological cells in confined geometries.
+A hybrid Lattice Boltzmann Method (LBM) and Molecular Dynamics (MD) simulation code for modeling the flow of soft particles such as polymers and biological cells in confined geometries. Molecular dynamics is coupled with lattice Boltzmann fluid through dissipative coupling.  
 
 **ASLB** (the internal name) extends the [Susp3D](http://www.che.ufl.edu/ladd/) particle suspension code (Tony Ladd, 2003) with deformable particle and polymer capabilities.
 
